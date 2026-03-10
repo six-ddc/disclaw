@@ -1,0 +1,252 @@
+/**
+ * Runner - In-process job runner with concurrency control
+ *
+ * Uses an async semaphore pattern for concurrency control.
+ * JS single-threaded execution guarantees submit() atomicity.
+ */
+
+import { queryClaudeSDK, generateTitle } from './claude-client.js';
+import { createClaudeSender } from './discord-sender.js';
+import { convertToClaudeMessages } from './message-converter.js';
+import { sendToThread, editMessage, renameThread, truncateCodePoints } from './discord.js';
+import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import { updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
+
+export interface ClaudeJob {
+    prompt: string;
+    threadId: string;
+    sessionId?: string;
+    resume: boolean;
+    userId: string;
+    username: string;
+    workingDir?: string;
+    /** Channel ID containing the status message (for updating "Processing..." → result) */
+    parentChannelId?: string;
+    /** The status message ID to update on completion */
+    statusMessageId?: string;
+    model?: string;
+    forkSession?: boolean;
+    resumeSessionAt?: string;
+    /** Factory that creates fresh MCP servers for each query() call (instances are single-use) */
+    createMcpServers?: () => Record<string, McpServerConfig>;
+    /** When false, only show the final result message (hide tool_use, tool_result, thinking etc.) */
+    verbose?: boolean;
+    /** When false, don't persist session to filesystem */
+    persistSession?: boolean;
+    /** Called when the job completes (success or final failure) */
+    onComplete?: (error?: Error) => void;
+}
+
+interface RunnerOptions {
+    concurrency?: number;
+    maxAttempts?: number;
+    backoffBaseMs?: number;
+}
+
+const log = (msg: string) => process.stdout.write(`[runner] ${msg}\n`);
+
+class JobRunner {
+    private active = 0;
+    private pending: ClaudeJob[] = [];
+    private readonly concurrency: number;
+    private readonly maxAttempts: number;
+    private readonly backoffBaseMs: number;
+    private drainResolve: (() => void) | null = null;
+    private activeQueries = new Map<string, Query>();
+    private cachedModels: ModelInfo[] = [];
+
+    constructor(options: RunnerOptions = {}) {
+        this.concurrency = options.concurrency ?? 2;
+        this.maxAttempts = options.maxAttempts ?? 3;
+        this.backoffBaseMs = options.backoffBaseMs ?? 1000;
+    }
+
+    submit(job: ClaudeJob): void {
+        if (this.active < this.concurrency) {
+            this.active++;
+            this.run(job);
+        } else {
+            log(`Queue full (${this.active}/${this.concurrency}), job queued for ${job.username}`);
+            this.pending.push(job);
+        }
+    }
+
+    private async run(job: ClaudeJob): Promise<void> {
+        try {
+            await this.executeWithRetry(job, 1);
+        } finally {
+            this.active--;
+            const next = this.pending.shift();
+            if (next) {
+                this.active++;
+                this.run(next);
+            } else if (this.active === 0 && this.drainResolve) {
+                this.drainResolve();
+                this.drainResolve = null;
+            }
+        }
+    }
+
+    private async executeWithRetry(job: ClaudeJob, attempt: number): Promise<void> {
+        log(`Processing job for ${job.username} (attempt ${attempt})`);
+        log(`Session: ${job.sessionId || '(auto)'}, Resume: ${job.resume}`);
+
+        const sender = createClaudeSender(job.threadId);
+        const verbose = job.verbose !== false; // default true
+        let lastResultText = '';
+
+        try {
+            const resultSessionId = await queryClaudeSDK({
+                prompt: job.prompt,
+                sessionId: job.sessionId,
+                resume: job.resume,
+                workingDir: job.workingDir,
+                model: job.model,
+                forkSession: job.forkSession,
+                resumeSessionAt: job.resumeSessionAt,
+                mcpServers: job.createMcpServers?.(),
+                persistSession: job.persistSession,
+                onQuery: (q) => {
+                    this.activeQueries.set(job.threadId, q);
+                    // Cache supported models from the first available query
+                    if (this.cachedModels.length === 0) {
+                        q.supportedModels().then(models => {
+                            this.cachedModels = models;
+                            log(`Cached ${models.length} supported models`);
+                        }).catch(e => log(`Failed to fetch supported models: ${e}`));
+                    }
+                },
+                onMessage: async (sdkMessage) => {
+                    // Capture the final result text for status message update
+                    if (sdkMessage.type === 'result' && sdkMessage.subtype === 'success') {
+                        lastResultText = sdkMessage.result;
+                    }
+
+                    if (verbose) {
+                        // Verbose: stream all messages as they arrive
+                        const messages = convertToClaudeMessages(sdkMessage);
+                        if (messages.length > 0) {
+                            await sender(messages);
+                        }
+                    } else {
+                        // Quiet: only send the final result text and completion stats
+                        if (sdkMessage.type === 'result') {
+                            if (sdkMessage.subtype === 'success' && sdkMessage.result) {
+                                await sender([{ type: 'text', content: sdkMessage.result }]);
+                            }
+                            // Always send completion stats
+                            const messages = convertToClaudeMessages(sdkMessage);
+                            const systemMessages = messages.filter(m => m.type === 'system');
+                            if (systemMessages.length > 0) {
+                                await sender(systemMessages);
+                            }
+                        }
+                    }
+                },
+            });
+
+            this.activeQueries.delete(job.threadId);
+
+            // If session ID changed (e.g. fork), update DB mapping
+            // Skip when no sessionId was provided (e.g. cron jobs with persistSession: false)
+            if (job.sessionId && resultSessionId !== job.sessionId) {
+                updateThreadSession(job.threadId, resultSessionId);
+                log(`Session ID updated for thread ${job.threadId}: ${resultSessionId}`);
+            }
+
+            // Update channel status message with the final reply
+            if (job.statusMessageId && job.parentChannelId && lastResultText) {
+                const statusText = truncateCodePoints(lastResultText, 2000);
+                await editMessage(job.parentChannelId, job.statusMessageId, statusText).catch(err => {
+                    log(`Failed to update status message: ${err}`);
+                });
+            }
+
+            // Generate title on first completion (async, non-blocking)
+            if (!getThreadTitle(job.threadId) && lastResultText) {
+                this.generateAndSetTitle(job.threadId, job.prompt, lastResultText);
+            }
+
+            log(`Job completed for ${job.username}`);
+            job.onComplete?.();
+        } catch (error) {
+            this.activeQueries.delete(job.threadId);
+
+            // Update status message to error state
+            if (job.statusMessageId && job.parentChannelId) {
+                await editMessage(job.parentChannelId, job.statusMessageId, `❌ Error`).catch(() => {});
+            }
+
+            const errMsg = error instanceof Error ? error.message : String(error);
+            const errStack = error instanceof Error ? error.stack : '';
+            log(`Job failed for ${job.username} (attempt ${attempt}): ${errMsg}`);
+            if (errStack) log(`Stack: ${errStack}`);
+
+            if (attempt < this.maxAttempts) {
+                const delay = this.backoffBaseMs * Math.pow(2, attempt - 1);
+                log(`Retrying in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                return this.executeWithRetry(job, attempt + 1);
+            }
+
+            job.onComplete?.(error instanceof Error ? error : new Error(String(error)));
+            await sendToThread(
+                job.threadId,
+                `Something went wrong. Try again?\n\`\`\`${error}\`\`\``
+            );
+        }
+    }
+
+    getModels(): ModelInfo[] {
+        return this.cachedModels;
+    }
+
+    isRunning(threadId: string): boolean {
+        return this.activeQueries.has(threadId);
+    }
+
+    async interrupt(threadId: string): Promise<boolean> {
+        const q = this.activeQueries.get(threadId);
+        if (!q) {
+            log(`Interrupt: no active query for thread ${threadId}`);
+            return false;
+        }
+        log(`Interrupting query for thread ${threadId}`);
+        await q.interrupt();
+        return true;
+    }
+
+    /** Generate a title via AI and update both DB and Discord thread name. */
+    private async generateAndSetTitle(threadId: string, prompt: string, reply: string): Promise<void> {
+        try {
+            log(`Generating title for thread ${threadId}`);
+            const title = await generateTitle([
+                { role: 'user', text: prompt },
+                { role: 'assistant', text: reply },
+            ]);
+            if (!title) {
+                log(`Empty title generated for thread ${threadId}`);
+                return;
+            }
+            setThreadTitle(threadId, title);
+            await renameThread(threadId, truncateCodePoints(title, 100));
+            log(`Title set for thread ${threadId}: ${title}`);
+        } catch (err) {
+            log(`Failed to generate title: ${err}`);
+        }
+    }
+
+    /**
+     * Wait for all active and pending jobs to complete.
+     */
+    drain(): Promise<void> {
+        if (this.active === 0 && this.pending.length === 0) {
+            return Promise.resolve();
+        }
+        return new Promise(resolve => {
+            this.drainResolve = resolve;
+        });
+    }
+}
+
+export const runner = new JobRunner();

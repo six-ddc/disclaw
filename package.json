@@ -1,0 +1,26 @@
+{
+  "name": "disclaw-bot",
+  "version": "1.1.6",
+  "description": "Discord bot that bridges messages to Claude Code sessions",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/six-ddc/disclaw"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/bot.ts",
+    "dev": "bun --watch run src/bot.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.72",
+    "croner": "^10.0.1",
+    "discord.js": "^14.25.1",
+    "zod": "^4.3.6"
+  }
+}
