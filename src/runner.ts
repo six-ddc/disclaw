@@ -8,7 +8,7 @@
 import { queryClaudeSDK, generateTitle } from './claude-client.js';
 import { createClaudeSender } from './discord-sender.js';
 import { convertToClaudeMessages } from './message-converter.js';
-import { sendToThread, editMessage, renameThread, truncateCodePoints } from './discord.js';
+import { sendToThread, editMessage, renameThread, truncateCodePoints, addReaction, removeReaction } from './discord.js';
 import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { getThreadMapping, resolveSessionState, updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
 import { createCanUseTool, cleanupThread } from './user-input.js';
@@ -38,6 +38,8 @@ export interface ClaudeJob {
     persistSession?: boolean;
     /** SDK permission mode override (per-thread from DB) */
     permissionMode?: string;
+    /** The Discord message ID that triggered this job (for queue indicator reactions) */
+    sourceMessageId?: string;
     /** Called when the job completes (success or final failure) */
     onComplete?: (error?: Error) => void;
 }
@@ -80,6 +82,10 @@ class JobRunner {
             }
             queue.push(job);
             log(`Thread ${job.threadId} busy, queued (${queue.length} pending for thread)`);
+            // Add loading reaction to indicate the message is queued
+            if (job.sourceMessageId) {
+                addReaction(job.threadId, job.sourceMessageId, '⏳').catch(() => {});
+            }
             return;
         }
 
@@ -124,6 +130,11 @@ class JobRunner {
     }
 
     private async executeWithRetry(job: ClaudeJob, attempt: number): Promise<void> {
+        // Remove queued indicator reaction now that execution is starting
+        if (job.sourceMessageId) {
+            removeReaction(job.threadId, job.sourceMessageId, '⏳').catch(() => {});
+        }
+
         // Lazy session resolution: when resume is undefined, resolve from DB at execution time
         // This ensures queued per-thread jobs always get the latest session state
         if (job.resume === undefined) {

@@ -224,6 +224,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             permissionMode: mapping.permission_mode || undefined,
             parentChannelId: parentId || undefined,
             statusMessageId: thread.id,
+            sourceMessageId: message.id,
             createMcpServers: parentId
                 ? () => ({ 'disclaw': createCronMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
                 : undefined,

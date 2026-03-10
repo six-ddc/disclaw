@@ -358,3 +358,22 @@ export async function editRichMessage(channelId: string, messageId: string, payl
     const msg = await channel.messages.fetch(messageId);
     await msg.edit(payload);
 }
+
+/**
+ * Add a reaction emoji to a message
+ */
+export async function addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    const channel = await getChannel(channelId);
+    const msg = await channel.messages.fetch(messageId);
+    await msg.react(emoji);
+}
+
+/**
+ * Remove the bot's own reaction from a message
+ */
+export async function removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
+    if (!client?.user) return;
+    const channel = await getChannel(channelId);
+    const msg = await channel.messages.fetch(messageId);
+    await msg.reactions.resolve(emoji)?.users.remove(client.user.id);
+}
