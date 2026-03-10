@@ -5,7 +5,7 @@
  * of SDKMessages, enabling real-time streaming to Discord.
  */
 
-import { query, type SDKMessage, type Query, type SDKResultMessage, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKMessage, type Query, type SDKResultMessage, type McpServerConfig, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 
 const TIMEZONE = process.env.TZ;
 
@@ -36,9 +36,12 @@ export interface QueryOptions {
     resumeSessionAt?: string;
     mcpServers?: Record<string, McpServerConfig>;
     persistSession?: boolean;
+    /** SDK permission mode override (per-thread from DB, falls back to env) */
+    permissionMode?: string;
     onMessage: (message: SDKMessage) => void | Promise<void>;
     onQuery?: (q: Query) => void;
     abortController?: AbortController;
+    canUseTool?: CanUseTool;
 }
 
 /**
@@ -49,7 +52,8 @@ export interface QueryOptions {
  */
 export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
     const { prompt, sessionId, resume, workingDir, onMessage, onQuery, abortController,
-            model, forkSession, resumeSessionAt, mcpServers, persistSession } = options;
+            model, forkSession, resumeSessionAt, mcpServers, persistSession, canUseTool,
+            permissionMode: permModeOverride } = options;
 
     const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || process.cwd();
     log(`Query - Session: ${sessionId || '(auto)'}, Resume: ${resume}`);
@@ -59,12 +63,19 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
 
     const systemPromptAppend = `Current date/time: ${getDatetimeContext()}`;
 
+    const disallowedTools: string[] = ['CronCreate', 'CronList', 'CronDelete'];
+
+    // Permission mode: per-thread override > env > default
+    const permMode = permModeOverride || process.env.DISCLAW_PERMISSION_MODE || 'default';
+    const useBypass = permMode === 'bypassPermissions';
+
     const iterator = query({
         prompt,
         options: {
             cwd,
-            permissionMode: 'bypassPermissions',
-            allowDangerouslySkipPermissions: true,
+            permissionMode: permMode as 'default' | 'bypassPermissions' | 'plan' | 'acceptEdits' | 'dontAsk',
+            ...(useBypass ? { allowDangerouslySkipPermissions: true } : {}),
+            ...(canUseTool ? { canUseTool } : {}),
             stderr: (data: string) => log(`[stderr] ${data}`),
             systemPrompt: {
                 type: 'preset',
@@ -77,10 +88,8 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
             ...(resumeSessionAt ? { resumeSessionAt } : {}),
             ...(mcpServers ? { mcpServers } : {}),
             ...(persistSession === false ? { persistSession: false } : {}),
-            disallowedTools: [
-                'AskUserQuestion',
-                ...(mcpServers ? ['CronCreate', 'CronList', 'CronDelete'] : []),
-            ],
+            disallowedTools,
+            settingSources: ['user', 'project', 'local'],
             abortController: controller,
             env: {
                 ...process.env as Record<string, string>,
@@ -146,7 +155,10 @@ export async function generateTitle(context: Array<{ role: string; text: string 
             maxTurns: 1,
             persistSession: false,
             systemPrompt: 'You are a title generator. Output only the title.',
-            permissionMode: 'plan',
+            permissionMode: 'bypassPermissions',
+            allowDangerouslySkipPermissions: true,
+            settingSources: ['user'],
+            stderr: (data: string) => log(`[title-stderr] ${data}`),
         },
     });
 

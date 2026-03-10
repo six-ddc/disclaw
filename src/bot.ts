@@ -29,12 +29,14 @@ import {
     handleFork,
     handleResume,
     handleCron,
+    handlePermission,
     validateWorkingDir,
 } from './interactions.js';
 import { handleDirPickInteraction } from './dir-picker.js';
 import { handleHistoryInteraction } from './history.js';
 import { initCronScheduler, createCronMcpServer, getCronScheduler } from './cron.js';
 import { handleCronInteraction } from './cron-buttons.js';
+import { handleUserInputInteraction } from './user-input.js';
 
 // Force unbuffered logging
 const log = (msg: string) => process.stdout.write(`[bot] ${msg}\n`);
@@ -119,6 +121,10 @@ client.once(Events.ClientReady, async (c) => {
         .addSubcommand(sub =>
             sub.setName('cron')
                .setDescription('List scheduled tasks')
+        )
+        .addSubcommand(sub =>
+            sub.setName('permission')
+               .setDescription('Set permission mode for this thread')
         );
 
     await c.application?.commands.create(command);
@@ -145,9 +151,14 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
             await handleResume(interaction);
         } else if (subcommand === 'cron') {
             await handleCron(interaction);
+        } else if (subcommand === 'permission') {
+            await handlePermission(interaction);
         }
         return;
     }
+
+    // Handle user input interactions (ask/approve: buttons, selects, modals)
+    if (await handleUserInputInteraction(interaction)) return;
 
     // Handle button interactions
     if (interaction.isButton()) {
@@ -210,6 +221,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             username: message.author.tag,
             workingDir,
             model: mapping.model || undefined,
+            permissionMode: mapping.permission_mode || undefined,
             parentChannelId: parentId || undefined,
             statusMessageId: thread.id,
             createMcpServers: parentId

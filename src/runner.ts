@@ -11,6 +11,7 @@ import { convertToClaudeMessages } from './message-converter.js';
 import { sendToThread, editMessage, renameThread, truncateCodePoints } from './discord.js';
 import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
+import { createCanUseTool, cleanupThread } from './user-input.js';
 
 export interface ClaudeJob {
     prompt: string;
@@ -33,6 +34,8 @@ export interface ClaudeJob {
     verbose?: boolean;
     /** When false, don't persist session to filesystem */
     persistSession?: boolean;
+    /** SDK permission mode override (per-thread from DB) */
+    permissionMode?: string;
     /** Called when the job completes (success or final failure) */
     onComplete?: (error?: Error) => void;
 }
@@ -95,6 +98,8 @@ class JobRunner {
         const verbose = job.verbose !== false; // default true
         let lastResultText = '';
 
+        const canUseTool = createCanUseTool(job.threadId);
+
         try {
             const resultSessionId = await queryClaudeSDK({
                 prompt: job.prompt,
@@ -106,6 +111,8 @@ class JobRunner {
                 resumeSessionAt: job.resumeSessionAt,
                 mcpServers: job.createMcpServers?.(),
                 persistSession: job.persistSession,
+                permissionMode: job.permissionMode,
+                canUseTool,
                 onQuery: (q) => {
                     this.activeQueries.set(job.threadId, q);
                     // Cache supported models from the first available query
@@ -146,6 +153,7 @@ class JobRunner {
             });
 
             this.activeQueries.delete(job.threadId);
+            cleanupThread(job.threadId);
 
             // If session ID changed (e.g. fork), update DB mapping
             // Skip when no sessionId was provided (e.g. cron jobs with persistSession: false)
@@ -171,6 +179,7 @@ class JobRunner {
             job.onComplete?.();
         } catch (error) {
             this.activeQueries.delete(job.threadId);
+            cleanupThread(job.threadId);
 
             // Update status message to error state
             if (job.statusMessageId && job.parentChannelId) {

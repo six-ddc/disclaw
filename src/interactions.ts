@@ -26,6 +26,7 @@ import {
     getThreadMapping,
     updateThreadSession,
     updateThreadModel,
+    updateThreadPermissionMode,
     listCronJobs,
     cronJobDisplayName,
 } from './db.js';
@@ -352,4 +353,64 @@ export async function handleCron(interaction: ChatInputCommandInteraction) {
             description: lines.join('\n'),
         }],
     });
+}
+
+/** Permission mode definitions with labels and descriptions */
+const PERMISSION_MODES = [
+    { value: 'default', label: 'Default', description: 'No auto-approvals; tools trigger approval UI' },
+    { value: 'dontAsk', label: 'Don\'t Ask', description: 'Deny instead of prompting (no canUseTool calls)' },
+    { value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-accept file edits and filesystem operations' },
+    { value: 'bypassPermissions', label: 'Bypass', description: 'All tools run without permission prompts' },
+    { value: 'plan', label: 'Plan', description: 'No tool execution; Claude plans without making changes' },
+] as const;
+
+export async function handlePermission(interaction: ChatInputCommandInteraction) {
+    const ctx = requireThreadSession(interaction);
+    if (!ctx) return;
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const currentMode = ctx.mapping.permission_mode || process.env.DISCLAW_PERMISSION_MODE || 'default';
+
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('disclaw_permission_select')
+        .setPlaceholder('Select permission mode')
+        .addOptions(
+            PERMISSION_MODES.map(m => ({
+                label: m.label,
+                value: m.value,
+                description: truncateCodePoints(m.description, 100),
+                default: m.value === currentMode,
+            }))
+        );
+
+    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+    const reply = await interaction.editReply({
+        content: `Current mode: **${PERMISSION_MODES.find(m => m.value === currentMode)?.label || currentMode}**\nSelect a new permission mode:`,
+        components: [row],
+    });
+
+    let selected: StringSelectMenuInteraction;
+    try {
+        selected = await reply.awaitMessageComponent({
+            componentType: ComponentType.StringSelect,
+            time: 60_000,
+        }) as StringSelectMenuInteraction;
+    } catch {
+        await interaction.editReply({ content: 'Selection timed out.', components: [] });
+        return;
+    }
+
+    const modeValue = selected.values[0]!;
+    const modeInfo = PERMISSION_MODES.find(m => m.value === modeValue);
+
+    // Store null if it matches the env default (so env can be changed without DB override)
+    const envDefault = process.env.DISCLAW_PERMISSION_MODE || 'default';
+    updateThreadPermissionMode(ctx.threadId, modeValue === envDefault ? null : modeValue);
+
+    await selected.update({
+        content: `Permission mode set to **${modeInfo?.label || modeValue}**: ${modeInfo?.description || ''}`,
+        components: [],
+    });
+    log(`Permission mode set to ${modeValue} in thread ${ctx.threadId}`);
 }

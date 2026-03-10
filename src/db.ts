@@ -63,6 +63,11 @@ try {
     db.run(`ALTER TABLE threads ADD COLUMN title TEXT`);
 } catch {} // Column may already exist
 
+// Add permission_mode column to threads table (migration)
+try {
+    db.run(`ALTER TABLE threads ADD COLUMN permission_mode TEXT`);
+} catch {} // Column may already exist
+
 // Create index for faster lookups
 db.run(`
     CREATE INDEX IF NOT EXISTS idx_threads_session
@@ -124,10 +129,11 @@ export interface ThreadMapping {
     working_dir: string | null;
     model: string | null;
     fork_from: string | null;
+    permission_mode: string | null;
 }
 
 export function getThreadMapping(threadId: string): ThreadMapping | null {
-    return db.query('SELECT session_id, working_dir, model, fork_from FROM threads WHERE thread_id = ?')
+    return db.query('SELECT session_id, working_dir, model, fork_from, permission_mode FROM threads WHERE thread_id = ?')
         .get(threadId) as ThreadMapping | null;
 }
 
@@ -137,6 +143,10 @@ export function updateThreadSession(threadId: string, sessionId: string | null):
 
 export function updateThreadModel(threadId: string, model: string): void {
     db.run('UPDATE threads SET model = ? WHERE thread_id = ?', [model, threadId]);
+}
+
+export function updateThreadPermissionMode(threadId: string, mode: string | null): void {
+    db.run('UPDATE threads SET permission_mode = ? WHERE thread_id = ?', [mode, threadId]);
 }
 
 function clearForkFrom(threadId: string): void {
