@@ -25,6 +25,7 @@ import {
     getCronJob,
     listCronJobs,
     setCronJobEnabled,
+    setCronJobLastRun,
     deleteCronJob,
     updateCronJob,
     getThreadMapping,
@@ -52,17 +53,37 @@ export class CronScheduler {
         this.client = client;
     }
 
-    /** Load all enabled jobs from DB and register them */
+    /** Load all enabled jobs from DB and register them, catching up missed runs */
     loadAll(): void {
         const jobs = listCronJobs();
         let count = 0;
+        const missed: string[] = [];
         for (const job of jobs) {
             if (job.enabled) {
                 this.register(job);
                 count++;
+                // Check if a run was missed while the server was down
+                if (job.last_run_at) {
+                    try {
+                        const lastRun = new Date(job.last_run_at);
+                        // Compute when the next run should have been after last_run_at
+                        const expectedNext = new Cron(job.schedule, {
+                            ...(TIMEZONE ? { timezone: TIMEZONE } : {}),
+                        }).nextRun(lastRun);
+                        if (expectedNext && expectedNext < new Date()) {
+                            missed.push(job.job_id);
+                        }
+                    } catch {}
+                }
             }
         }
         log(`Loaded ${count} cron jobs`);
+        if (missed.length > 0) {
+            log(`Catching up ${missed.length} missed job(s): ${missed.join(', ')}`);
+            for (const jobId of missed) {
+                this.execute(jobId);
+            }
+        }
     }
 
     /** Register a croner instance for a job */
@@ -98,6 +119,9 @@ export class CronScheduler {
         if (!job || !job.enabled) return;
 
         log(`Executing job ${jobId}: ${job.prompt.slice(0, 50)}`);
+
+        // Record execution time
+        setCronJobLastRun(jobId);
 
         // Get thread info for working dir and model
         const mapping = getThreadMapping(job.thread_id);

@@ -97,6 +97,11 @@ try {
     db.run(`ALTER TABLE cron_jobs ADD COLUMN verbose INTEGER DEFAULT 0`);
 } catch {} // Column may already exist
 
+// Add last_run_at column to cron_jobs table (migration)
+try {
+    db.run(`ALTER TABLE cron_jobs ADD COLUMN last_run_at TEXT`);
+} catch {} // Column may already exist
+
 console.log(`[db] SQLite database ready at ${DB_PATH}`);
 
 // In-memory cache for channel configs (TTL: 5 minutes)
@@ -225,6 +230,7 @@ export interface CronJob {
     enabled: number;
     name: string | null;
     verbose: number;
+    last_run_at: string | null;
 }
 
 /** Display name for a cron job: explicit name or truncated prompt fallback */
@@ -254,17 +260,17 @@ export function updateCronJob(jobId: string, fields: { name?: string; schedule?:
 }
 
 export function getCronJob(jobId: string): CronJob | null {
-    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose FROM cron_jobs WHERE job_id = ?')
+    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose, last_run_at FROM cron_jobs WHERE job_id = ?')
         .get(jobId) as CronJob | null;
 }
 
 export function getCronJobByThread(threadId: string): CronJob | null {
-    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose FROM cron_jobs WHERE thread_id = ?')
+    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose, last_run_at FROM cron_jobs WHERE thread_id = ?')
         .get(threadId) as CronJob | null;
 }
 
 export function listCronJobs(): CronJob[] {
-    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose FROM cron_jobs ORDER BY created_at DESC')
+    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose, last_run_at FROM cron_jobs ORDER BY created_at DESC')
         .all() as CronJob[];
 }
 
@@ -274,6 +280,10 @@ export function setCronJobVerbose(jobId: string, verbose: boolean): void {
 
 export function setCronJobEnabled(jobId: string, enabled: boolean): void {
     db.run('UPDATE cron_jobs SET enabled = ? WHERE job_id = ?', [enabled ? 1 : 0, jobId]);
+}
+
+export function setCronJobLastRun(jobId: string): void {
+    db.run('UPDATE cron_jobs SET last_run_at = ? WHERE job_id = ?', [new Date().toISOString(), jobId]);
 }
 
 export function deleteCronJob(jobId: string): void {
