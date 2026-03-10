@@ -173,9 +173,12 @@ export async function generateTitle(context: Array<{ role: string; text: string 
             maxTurns: 1,
             persistSession: false,
             systemPrompt: 'You are a title generator. Output only the title.',
-            permissionMode: 'bypassPermissions',
-            allowDangerouslySkipPermissions: true,
+            permissionMode: 'dontAsk',
             settingSources: ['user'],
+            env: {
+                ...process.env as Record<string, string>,
+                IS_SANDBOX: '1',
+            },
             stderr: (data: string) => log(`[title-stderr] ${data}`),
         },
     });

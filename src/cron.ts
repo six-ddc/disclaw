@@ -36,8 +36,6 @@ import {
 } from './db.js';
 import { sendEmbed, renameThread, truncateCodePoints } from './discord.js';
 import { sendCronControlPanel } from './cron-buttons.js';
-import { generateTitle } from './claude-client.js';
-import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 
 const log = (msg: string) => process.stdout.write(`[cron] ${msg}\n`);
 
@@ -492,7 +490,7 @@ export function createCronMcpServer(
 
     const titleGenerateTool = tool(
         'title_generate',
-        'Regenerate or update the title of the current Discord thread. Fetches the latest conversation context and generates a short emoji-prefixed title. Use when the user asks to update, regenerate, or change the thread title.',
+        'Regenerate or update the title of the current Discord thread. Clears the current title so it will be regenerated when this query completes. Use when the user asks to update, regenerate, or change the thread title.',
         {},
         async () => {
             if (!sourceThreadId) {
@@ -502,69 +500,12 @@ export function createCronMcpServer(
                 };
             }
 
-            try {
-                // Get current session ID for this thread
-                const mapping = getThreadMapping(sourceThreadId);
-                if (!mapping?.session_id) {
-                    return {
-                        content: [{ type: 'text' as const, text: 'No session found for this thread.' }],
-                        isError: true,
-                    };
-                }
+            // Clear the title — runner will regenerate it after this query completes
+            setThreadTitle(sourceThreadId, '');
 
-                // Fetch session messages and extract last 5 turns (10 messages)
-                const rawMessages = await getSessionMessages(mapping.session_id, { dir: workingDir });
-
-                interface MessageEntry { type: 'user' | 'assistant'; message?: { content?: unknown } }
-                const entries: Array<{ role: string; text: string }> = [];
-                for (const msg of rawMessages as MessageEntry[]) {
-                    if (msg.type !== 'user' && msg.type !== 'assistant') continue;
-                    const content = msg.message?.content;
-                    let text = '';
-                    if (typeof content === 'string') {
-                        text = content;
-                    } else if (Array.isArray(content)) {
-                        text = content
-                            .filter((c: { type?: string }) => c.type === 'text')
-                            .map((c: { text?: string }) => c.text || '')
-                            .join('');
-                    }
-                    if (text.trim()) {
-                        entries.push({ role: msg.type, text });
-                    }
-                }
-
-                // Take last 5 turns (last 10 entries)
-                const recentEntries = entries.slice(-10);
-
-                if (recentEntries.length === 0) {
-                    return {
-                        content: [{ type: 'text' as const, text: 'No conversation content found.' }],
-                        isError: true,
-                    };
-                }
-
-                const title = await generateTitle(recentEntries);
-                if (!title) {
-                    return {
-                        content: [{ type: 'text' as const, text: 'Failed to generate title.' }],
-                        isError: true,
-                    };
-                }
-
-                // Update DB and Discord thread name
-                setThreadTitle(sourceThreadId, title);
-                await renameThread(sourceThreadId, truncateCodePoints(title, 100));
-
-                return {
-                    content: [{ type: 'text' as const, text: `Title updated: ${title}` }],
-                };
-            } catch (err) {
-                return {
-                    content: [{ type: 'text' as const, text: `Failed to generate title: ${err}` }],
-                    isError: true,
-                };
-            }
+            return {
+                content: [{ type: 'text' as const, text: 'Title will be regenerated when this response completes.' }],
+            };
         },
     );
 
