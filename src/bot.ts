@@ -19,7 +19,7 @@ import {
 import { homedir } from 'os';
 import { resolve } from 'path';
 import { runner } from './runner.js';
-import { db, getChannelConfigCached, getThreadMapping, resolveSessionState } from './db.js';
+import { db, getChannelConfigCached, getThreadMapping } from './db.js';
 import { truncateCodePoints, initDiscord } from './discord.js';
 import {
     handleConfig,
@@ -37,6 +37,7 @@ import { handleHistoryInteraction } from './history.js';
 import { initCronScheduler, createCronMcpServer, getCronScheduler } from './cron.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
+import { extractMessageContent } from './attachment-handler.js';
 
 // Force unbuffered logging
 const log = (msg: string) => process.stdout.write(`[bot] ${msg}\n`);
@@ -200,8 +201,9 @@ client.on(Events.MessageCreate, async (message: Message) => {
         // Show typing indicator
         await thread.sendTyping();
 
-        // Extract message content (strip @mentions)
-        const content = message.content.replace(/<@!?\d+>/g, '').trim();
+        // Extract multimodal content (images, files, replies)
+        const multimodalPrompt = await extractMessageContent(message);
+        const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
         // Use stored working dir or fall back to channel config / env / cwd
         const workingDir = mapping.working_dir ||
@@ -209,14 +211,12 @@ client.on(Events.MessageCreate, async (message: Message) => {
             process.env.CLAUDE_WORKING_DIR ||
             process.cwd();
 
-        // Resolve session state (fork / new / resume) — all DB writes happen inside
-        const session = resolveSessionState(thread.id, mapping);
-
         const parentId = thread.parentId || '';
         runner.submit({
-            prompt: content,
+            prompt,
             threadId: thread.id,
-            ...session,
+            // resume: undefined — session state resolved lazily at execution time
+            // so per-thread queued jobs always get the latest DB state
             userId: message.author.id,
             username: message.author.tag,
             workingDir,
@@ -251,13 +251,18 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
     log(`Working directory: ${workingDir}`);
 
+    // Extract multimodal content (images, files, replies) using the cleaned text
+    const multimodalPrompt = await extractMessageContent(message, cleanedMessage);
+    const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
+    const displayText = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt.textSummary;
+
     // Post status message in channel, then create thread from it
     let statusMessage;
     let thread;
     try {
         statusMessage = await (message.channel as TextChannel).send('Processing...');
 
-        const threadName = truncateCodePoints(cleanedMessage || 'New conversation', 50);
+        const threadName = truncateCodePoints(displayText || 'New conversation', 50);
 
         thread = await statusMessage.startThread({
             name: threadName,
@@ -287,7 +292,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
     await thread.sendTyping();
 
     runner.submit({
-        prompt: cleanedMessage,
+        prompt,
         threadId: thread.id,
         sessionId,
         resume: false,

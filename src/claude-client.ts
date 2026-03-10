@@ -5,7 +5,8 @@
  * of SDKMessages, enabling real-time streaming to Discord.
  */
 
-import { query, type SDKMessage, type Query, type SDKResultMessage, type McpServerConfig, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKMessage, type Query, type SDKResultMessage, type McpServerConfig, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { MultimodalPrompt } from './attachment-handler.js';
 
 const TIMEZONE = process.env.TZ;
 
@@ -27,7 +28,7 @@ function getDatetimeContext(): string {
 }
 
 export interface QueryOptions {
-    prompt: string;
+    prompt: string | MultimodalPrompt;
     sessionId?: string;
     resume: boolean;
     workingDir?: string;
@@ -69,8 +70,25 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
     const permMode = permModeOverride || process.env.DISCLAW_PERMISSION_MODE || 'default';
     const useBypass = permMode === 'bypassPermissions';
 
+    // Build the prompt for the SDK
+    let sdkPrompt: string | AsyncIterable<SDKUserMessage>;
+    if (typeof prompt === 'string') {
+        sdkPrompt = prompt;
+    } else if (prompt.type === 'text') {
+        sdkPrompt = prompt.text;
+    } else {
+        // Multimodal: wrap content blocks into an SDKUserMessage async iterable
+        const userMessage: SDKUserMessage = {
+            type: 'user',
+            message: { role: 'user', content: prompt.blocks },
+            parent_tool_use_id: null,
+            session_id: sessionId || crypto.randomUUID(),
+        };
+        sdkPrompt = (async function*() { yield userMessage; })();
+    }
+
     const iterator = query({
-        prompt,
+        prompt: sdkPrompt,
         options: {
             cwd,
             permissionMode: permMode as 'default' | 'bypassPermissions' | 'plan' | 'acceptEdits' | 'dontAsk',

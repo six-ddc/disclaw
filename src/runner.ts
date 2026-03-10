@@ -10,14 +10,16 @@ import { createClaudeSender } from './discord-sender.js';
 import { convertToClaudeMessages } from './message-converter.js';
 import { sendToThread, editMessage, renameThread, truncateCodePoints } from './discord.js';
 import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
-import { updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
+import { getThreadMapping, resolveSessionState, updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
 import { createCanUseTool, cleanupThread } from './user-input.js';
+import type { MultimodalPrompt } from './attachment-handler.js';
 
 export interface ClaudeJob {
-    prompt: string;
+    prompt: string | MultimodalPrompt;
     threadId: string;
     sessionId?: string;
-    resume: boolean;
+    /** true=resume, false=new session, undefined=resolve from DB at execution time */
+    resume?: boolean;
     userId: string;
     username: string;
     workingDir?: string;
@@ -57,6 +59,10 @@ class JobRunner {
     private drainResolve: (() => void) | null = null;
     private activeQueries = new Map<string, Query>();
     private cachedModels: ModelInfo[] = [];
+    /** Tracks threads that have a job running or waiting in the global pending queue */
+    private runningThreads = new Set<string>();
+    /** Per-thread overflow queue: jobs waiting for the current thread job to finish */
+    private threadQueues = new Map<string, ClaudeJob[]>();
 
     constructor(options: RunnerOptions = {}) {
         this.concurrency = options.concurrency ?? 2;
@@ -65,6 +71,20 @@ class JobRunner {
     }
 
     submit(job: ClaudeJob): void {
+        // Per-thread serialization: only one job per thread at a time
+        if (this.runningThreads.has(job.threadId)) {
+            let queue = this.threadQueues.get(job.threadId);
+            if (!queue) {
+                queue = [];
+                this.threadQueues.set(job.threadId, queue);
+            }
+            queue.push(job);
+            log(`Thread ${job.threadId} busy, queued (${queue.length} pending for thread)`);
+            return;
+        }
+
+        this.runningThreads.add(job.threadId);
+
         if (this.active < this.concurrency) {
             this.active++;
             this.run(job);
@@ -79,6 +99,19 @@ class JobRunner {
             await this.executeWithRetry(job, 1);
         } finally {
             this.active--;
+
+            // Promote next per-thread job to global pending queue
+            const queue = this.threadQueues.get(job.threadId);
+            if (queue && queue.length > 0) {
+                const next = queue.shift()!;
+                if (queue.length === 0) this.threadQueues.delete(job.threadId);
+                // Keep runningThreads mark; prioritize by pushing to front
+                this.pending.unshift(next);
+            } else {
+                this.runningThreads.delete(job.threadId);
+            }
+
+            // Fill concurrency slots from global queue
             const next = this.pending.shift();
             if (next) {
                 this.active++;
@@ -91,6 +124,19 @@ class JobRunner {
     }
 
     private async executeWithRetry(job: ClaudeJob, attempt: number): Promise<void> {
+        // Lazy session resolution: when resume is undefined, resolve from DB at execution time
+        // This ensures queued per-thread jobs always get the latest session state
+        if (job.resume === undefined) {
+            const mapping = getThreadMapping(job.threadId);
+            if (mapping) {
+                const session = resolveSessionState(job.threadId, mapping);
+                job = { ...job, ...session };
+            } else {
+                // Thread mapping gone (e.g. deleted) — treat as new session
+                job = { ...job, sessionId: crypto.randomUUID(), resume: false };
+            }
+        }
+
         log(`Processing job for ${job.username} (attempt ${attempt})`);
         log(`Session: ${job.sessionId || '(auto)'}, Resume: ${job.resume}`);
 
@@ -104,7 +150,7 @@ class JobRunner {
             const resultSessionId = await queryClaudeSDK({
                 prompt: job.prompt,
                 sessionId: job.sessionId,
-                resume: job.resume,
+                resume: job.resume ?? false,
                 workingDir: job.workingDir,
                 model: job.model,
                 forkSession: job.forkSession,
@@ -172,7 +218,10 @@ class JobRunner {
 
             // Generate title on first completion (async, non-blocking)
             if (!getThreadTitle(job.threadId) && lastResultText) {
-                this.generateAndSetTitle(job.threadId, job.prompt, lastResultText);
+                const promptText = typeof job.prompt === 'string'
+                    ? job.prompt
+                    : job.prompt.type === 'text' ? job.prompt.text : job.prompt.textSummary;
+                this.generateAndSetTitle(job.threadId, promptText, lastResultText);
             }
 
             log(`Job completed for ${job.username}`);
@@ -211,7 +260,7 @@ class JobRunner {
     }
 
     isRunning(threadId: string): boolean {
-        return this.activeQueries.has(threadId);
+        return this.runningThreads.has(threadId);
     }
 
     async interrupt(threadId: string): Promise<boolean> {
