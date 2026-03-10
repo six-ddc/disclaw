@@ -97,7 +97,7 @@ client.once(Events.ClientReady, async (c) => {
         .setDescription('Disclaw bot commands')
         .addSubcommand(sub =>
             sub.setName('config')
-               .setDescription('Configure channel working directory')
+               .setDescription('Configure working directory (channel default or thread override)')
         )
         .addSubcommand(sub =>
             sub.setName('clear')
@@ -206,10 +206,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
         const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
         // Use stored working dir or fall back to channel config / env / cwd
-        const workingDir = mapping.working_dir ||
+        const workingDir = resolve(mapping.working_dir ||
             getChannelConfigCached(thread.parentId || '')?.working_dir ||
             process.env.CLAUDE_WORKING_DIR ||
-            process.cwd();
+            process.cwd());
 
         const parentId = thread.parentId || '';
         runner.submit({
@@ -280,21 +280,18 @@ client.on(Events.MessageCreate, async (message: Message) => {
         return;
     }
 
-    const sessionId = crypto.randomUUID();
-
     db.run(
         'INSERT INTO threads (thread_id, session_id, working_dir) VALUES (?, ?, ?)',
-        [thread.id, sessionId, workingDir]
+        [thread.id, '', workingDir]
     );
 
-    log(`Created thread ${thread.id} with session ${sessionId}`);
+    log(`Created thread ${thread.id}`);
 
     await thread.sendTyping();
 
     runner.submit({
         prompt,
         threadId: thread.id,
-        sessionId,
         resume: false,
         userId: message.author.id,
         username: message.author.tag,

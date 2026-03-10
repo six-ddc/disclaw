@@ -27,10 +27,11 @@ import {
     updateThreadSession,
     updateThreadModel,
     updateThreadPermissionMode,
+    updateThreadWorkingDir,
     listCronJobs,
     cronJobDisplayName,
 } from './db.js';
-import { truncateCodePoints, sendToThread } from './discord.js';
+import { truncateCodePoints, sendToThread, sendEmbed } from './discord.js';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { startDirPicker } from './dir-picker.js';
 import { sendHistory } from './history.js';
@@ -87,25 +88,49 @@ function requireThreadSession(interaction: ChatInputCommandInteraction) {
 // =========================================================================
 
 export async function handleConfig(interaction: ChatInputCommandInteraction) {
-    // Config operates on channels, not threads
-    if (interaction.channel?.isThread()) {
-        await interaction.reply({
-            content: 'Use this command in a channel, not a thread. It configures the channel\'s working directory.',
-            flags: MessageFlags.Ephemeral,
-        });
+    const isThread = interaction.channel?.isThread();
+
+    // Thread context: require an active session
+    if (isThread) {
+        const threadId = interaction.channel!.id;
+        const mapping = getThreadMapping(threadId);
+        if (!mapping) {
+            await interaction.reply({ content: 'No active session in this thread.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        // Start dir: thread working_dir → channel config → env → cwd
+        const parentId = interaction.channel!.isThread() ? (interaction.channel!.parentId || '') : '';
+        const startDir = mapping.working_dir ||
+            getChannelConfigCached(parentId)?.working_dir ||
+            process.env.CLAUDE_WORKING_DIR || process.cwd();
+
+        const selected = await startDirPicker(interaction, startDir);
+        if (!selected) return;
+
+        const validationError = validateWorkingDir(selected);
+        if (validationError) {
+            await interaction.editReply({ content: validationError, components: [] });
+            return;
+        }
+
+        updateThreadWorkingDir(threadId, selected);
+        updateThreadSession(threadId, null); // Clear session — new dir needs fresh session
+        log(`Thread ${threadId} working dir set to: ${selected}`);
         return;
     }
 
+    // Channel context: set channel default
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    // Start from current channel config, or cwd
     const currentConfig = getChannelConfigCached(interaction.channelId);
     const startDir = currentConfig?.working_dir || process.env.CLAUDE_WORKING_DIR || process.cwd();
 
     const selected = await startDirPicker(interaction, startDir);
-    if (!selected) return; // Cancelled or timed out
+    if (!selected) return;
 
-    // Validate against allowlist
     const validationError = validateWorkingDir(selected);
     if (validationError) {
         await interaction.editReply({ content: validationError, components: [] });
@@ -213,10 +238,10 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
         }
 
         // Determine working dir (inherit from original thread)
-        const workingDir = ctx.mapping.working_dir ||
+        const workingDir = resolve(ctx.mapping.working_dir ||
             getChannelConfigCached(parentChannelId)?.working_dir ||
             process.env.CLAUDE_WORKING_DIR ||
-            process.cwd();
+            process.cwd());
 
         // Create status message and new thread in parent channel
         const statusMessage = await (parentChannel as TextChannel).send('Forked conversation');
@@ -246,12 +271,17 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-        // Determine working dir
-        const channelId = interaction.channel?.isThread()
-            ? (interaction.channel.parentId || interaction.channelId)
+        // Determine working dir: thread working_dir → channel config → env → cwd
+        const isThread = interaction.channel?.isThread();
+        const threadMapping = isThread ? getThreadMapping(interaction.channel!.id) : null;
+        const channelId = isThread
+            ? (interaction.channel!.parentId || interaction.channelId)
             : interaction.channelId;
         const channelConfig = getChannelConfigCached(channelId);
-        const workingDir = channelConfig?.working_dir || process.env.CLAUDE_WORKING_DIR || process.cwd();
+        const workingDir = resolve(
+            threadMapping?.working_dir ||
+            channelConfig?.working_dir ||
+            process.env.CLAUDE_WORKING_DIR || process.cwd());
 
         // List recent sessions
         const sessions = await listSessions({ dir: workingDir, limit: 25 });
@@ -307,6 +337,10 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
             if (mapping) {
                 updateThreadSession(threadId, selectedSessionId);
                 await selected.update({ content: `Resumed: ${summary}`, components: [] });
+                await sendEmbed(threadId, [{
+                    color: 0x57f287,
+                    description: `**Resumed session** · \`${workingDir}\``,
+                }]);
                 await sendHistory(threadId, selectedSessionId, workingDir);
                 log(`Resumed session ${selectedSessionId} in thread ${threadId}`);
             } else {
@@ -326,6 +360,10 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
             );
 
             await selected.update({ content: `Resumed in <#${newThread.id}>`, components: [] });
+            await sendEmbed(newThread.id, [{
+                color: 0x57f287,
+                description: `**Resumed session** · \`${workingDir}\``,
+            }]);
             await sendHistory(newThread.id, selectedSessionId, workingDir);
             log(`Resumed session ${selectedSessionId} in new thread ${newThread.id}`);
         }

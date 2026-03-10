@@ -320,9 +320,23 @@ export function createClaudeSender(threadId: string) {
                 }
 
                 case 'system': {
-                    const isCompletion = meta<string>(msg.metadata, 'subtype', '') === 'completion';
+                    const subtype = meta<string>(msg.metadata, 'subtype', '');
 
-                    if (isCompletion) {
+                    if (subtype === 'new_session') {
+                        const label = meta<string>(msg.metadata, 'label', 'New session');
+                        const parts: string[] = [];
+                        const model = meta<string>(msg.metadata, 'model', '');
+                        if (model) parts.push(model);
+                        const cwd = meta<string>(msg.metadata, 'cwd', '');
+                        if (cwd) parts.push(`\`${cwd}\``);
+                        await sendEmbed(threadId, [{
+                            color: 0x57f287,
+                            description: `**${label}** · ${parts.join(' · ')}`,
+                        }]);
+                        break;
+                    }
+
+                    if (subtype === 'completion') {
                         // Compact completion line: Done · model · ctx 42% · 3.2s
                         const parts: string[] = [];
                         // model field or extract from modelUsage keys

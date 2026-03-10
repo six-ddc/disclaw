@@ -5,6 +5,7 @@
  * a factory function to create an SDK MCP server exposing cron tools.
  */
 
+import { resolve } from 'path';
 import { Cron } from 'croner';
 import { z } from 'zod/v4';
 import {
@@ -100,10 +101,10 @@ export class CronScheduler {
 
         // Get thread info for working dir and model
         const mapping = getThreadMapping(job.thread_id);
-        const workingDir = mapping?.working_dir ||
+        const workingDir = resolve(mapping?.working_dir ||
             getChannelConfigCached(job.thread_id)?.working_dir ||
             process.env.CLAUDE_WORKING_DIR ||
-            process.cwd();
+            process.cwd());
 
         // Send separator embed
         const now = new Date();
@@ -123,6 +124,7 @@ export class CronScheduler {
             threadId: job.thread_id,
             resume: false,
             persistSession: false,
+            permissionMode: 'bypassPermissions',
             userId: job.creator_id,
             username: 'cron',
             workingDir,

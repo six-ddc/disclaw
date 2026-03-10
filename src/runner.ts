@@ -133,7 +133,7 @@ class JobRunner {
                 job = { ...job, ...session };
             } else {
                 // Thread mapping gone (e.g. deleted) — treat as new session
-                job = { ...job, sessionId: crypto.randomUUID(), resume: false };
+                job = { ...job, sessionId: '', resume: false };
             }
         }
 
@@ -173,6 +173,31 @@ class JobRunner {
                     // Capture the final result text for status message update
                     if (sdkMessage.type === 'result' && sdkMessage.subtype === 'success') {
                         lastResultText = sdkMessage.result;
+                    }
+
+                    // Detect new/changed session from SDK init message
+                    // Skip ephemeral sessions (persistSession: false, e.g. cron jobs)
+                    if (sdkMessage.type === 'system' && (sdkMessage as Record<string, unknown>).subtype === 'init'
+                        && job.persistSession !== false) {
+                        const initMsg = sdkMessage as Record<string, unknown>;
+                        const initSessionId = initMsg.session_id as string;
+                        log(`Init: sdk_session=${initSessionId}, job.sessionId=${job.sessionId || '(empty)'}`);
+                        if (initSessionId && initSessionId !== job.sessionId) {
+                            // Save SDK-generated session ID to DB
+                            updateThreadSession(job.threadId, initSessionId);
+                            log(`Session saved for thread ${job.threadId}: ${initSessionId}`);
+                            const label = job.forkSession ? 'Forked session' : 'New session';
+                            await sender([{
+                                type: 'system',
+                                content: '',
+                                metadata: {
+                                    subtype: 'new_session',
+                                    label,
+                                    model: initMsg.model,
+                                    cwd: initMsg.cwd,
+                                },
+                            }]);
+                        }
                     }
 
                     if (verbose) {

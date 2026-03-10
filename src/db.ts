@@ -16,7 +16,7 @@ const DB_PATH = process.env.DB_PATH || './data/threads.db';
 
 // Ensure data directory exists
 import { mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, resolve } from 'path';
 try {
     mkdirSync(dirname(DB_PATH), { recursive: true });
 } catch {}
@@ -149,6 +149,10 @@ export function updateThreadPermissionMode(threadId: string, mode: string | null
     db.run('UPDATE threads SET permission_mode = ? WHERE thread_id = ?', [mode, threadId]);
 }
 
+export function updateThreadWorkingDir(threadId: string, workingDir: string): void {
+    db.run('UPDATE threads SET working_dir = ? WHERE thread_id = ?', [resolve(workingDir), threadId]);
+}
+
 function clearForkFrom(threadId: string): void {
     db.run('UPDATE threads SET fork_from = NULL WHERE thread_id = ?', [threadId]);
 }
@@ -186,12 +190,10 @@ export function resolveSessionState(threadId: string, mapping: ThreadMapping): {
         return { sessionId, resume: true, forkSession: true };
     }
 
-    // Cleared / new: generate fresh session ID and persist
+    // Cleared / new: let SDK auto-generate session ID (saved on init message)
     if (!mapping.session_id) {
-        const sessionId = crypto.randomUUID();
-        db.run('UPDATE threads SET session_id = ? WHERE thread_id = ?', [sessionId, threadId]);
-        log(`Session state: new (thread=${threadId}, session=${sessionId})`);
-        return { sessionId, resume: false };
+        log(`Session state: new (thread=${threadId})`);
+        return { sessionId: '', resume: false };
     }
 
     // Normal resume
@@ -200,10 +202,11 @@ export function resolveSessionState(threadId: string, mapping: ThreadMapping): {
 }
 
 export function setChannelConfig(channelId: string, workingDir: string): void {
+    const absDir = resolve(workingDir);
     db.run(`
         INSERT INTO channels (channel_id, working_dir) VALUES (?, ?)
         ON CONFLICT(channel_id) DO UPDATE SET working_dir = ?, updated_at = CURRENT_TIMESTAMP
-    `, [channelId, workingDir, workingDir]);
+    `, [channelId, absDir, absDir]);
 
     // Invalidate cache
     channelConfigCache.delete(channelId);
