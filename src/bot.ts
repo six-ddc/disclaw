@@ -22,7 +22,7 @@ import { runner } from './runner.js';
 import { db, getChannelConfigCached, getThreadMapping } from './db.js';
 import { truncateCodePoints, initDiscord } from './discord.js';
 import {
-    handleConfig,
+    handleCd,
     handleClear,
     handleInterrupt,
     handleModel,
@@ -96,8 +96,8 @@ client.once(Events.ClientReady, async (c) => {
         .setName('disclaw')
         .setDescription('Disclaw bot commands')
         .addSubcommand(sub =>
-            sub.setName('config')
-               .setDescription('Configure working directory (channel default or thread override)')
+            sub.setName('cd')
+               .setDescription('Change working directory (channel default or thread override)')
         )
         .addSubcommand(sub =>
             sub.setName('clear')
@@ -138,8 +138,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     // Handle /disclaw slash commands
     if (interaction.isChatInputCommand() && interaction.commandName === 'disclaw') {
         const subcommand = interaction.options.getSubcommand();
-        if (subcommand === 'config') {
-            await handleConfig(interaction);
+        if (subcommand === 'cd') {
+            await handleCd(interaction);
         } else if (subcommand === 'clear') {
             await handleClear(interaction);
         } else if (subcommand === 'interrupt') {

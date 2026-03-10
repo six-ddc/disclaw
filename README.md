@@ -13,6 +13,7 @@ A Discord harness for Claude Code. Thread-based AI conversations with rich inter
 - Follow-up messages in the thread resume the same session automatically
 - AI-generated thread titles (emoji-prefixed) based on conversation content
 - Channel status messages show response previews without opening threads
+- Multimodal input: images (PNG/JPEG/GIF/WebP), PDFs, text file attachments, and reply references are sent to Claude as content blocks
 
 ### Rich Message Rendering
 - Claude's text output renders as full Discord markdown (code blocks, lists, etc.)
@@ -21,17 +22,19 @@ A Discord harness for Claude Code. Thread-based AI conversations with rich inter
 - Long messages split intelligently at markdown boundaries (preserving code fences)
 - Markdown tables auto-converted to card-style layout (Discord has no table rendering)
 - Completion stats: model name, context usage %, response time
+- Session change notifications: "New session", "Forked session", "Resumed session" embeds with model and working directory
 
 ### Slash Commands (`/disclaw`)
-| Command | Where | Description |
-|---------|-------|-------------|
-| `config` | Channel | Set channel working directory (interactive directory browser) |
-| `clear` | Thread | Clear context and start a fresh session |
-| `interrupt` | Thread | Stop the current Claude processing |
-| `model` | Thread | Switch Claude model via select menu |
-| `fork` | Thread | Fork conversation into a new thread (branching) |
-| `resume` | Anywhere | Resume a previous session from a select menu |
-| `cron` | Anywhere | List all scheduled tasks |
+| Command | Description |
+|---------|-------------|
+| `cd` | Change working directory (channel default or thread override) |
+| `clear` | Clear context and start a fresh session |
+| `interrupt` | Stop the current Claude processing |
+| `model` | Switch Claude model |
+| `fork` | Fork conversation into a new thread |
+| `resume` | Resume a previous session |
+| `cron` | List all scheduled tasks |
+| `permission` | Set permission mode (default, dontAsk, acceptEdits, bypassPermissions, plan) |
 
 ### Scheduled Tasks (Cron)
 Claude can create recurring tasks that run on a cron schedule. Each task gets its own dedicated thread with a control panel:
@@ -51,9 +54,10 @@ Claude can create recurring tasks that run on a cron schedule. Each task gets it
 Each conversation runs Claude Code in a specific directory. Resolution chain:
 
 1. **Per-message override**: `@bot [~/projects/foo] what files are here?`
-2. **Channel config**: `/disclaw config` opens an interactive directory browser with pagination
-3. **Environment variable**: `CLAUDE_WORKING_DIR`
-4. **Fallback**: `process.cwd()`
+2. **Thread config**: `/disclaw cd` in a thread sets a thread-level override (clears session for fresh start)
+3. **Channel config**: `/disclaw cd` in a channel sets the default for all new threads
+4. **Environment variable**: `CLAUDE_WORKING_DIR`
+5. **Fallback**: `process.cwd()`
 
 For multi-user deployments, set `DISCLAW_ALLOWED_DIRS` to restrict accessible directories:
 ```bash
@@ -115,6 +119,7 @@ Single process. No Redis, no queue, no HTTP server. The runner uses an async sem
 | `CLAUDE_WORKING_DIR` | No | `cwd` | Default working directory for Claude |
 | `DISCLAW_ALLOWED_DIRS` | No | — | Comma-separated directory allowlist |
 | `DB_PATH` | No | `./data/threads.db` | SQLite database path |
+| `DISCLAW_PERMISSION_MODE` | No | `default` | Default permission mode (`default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`) |
 | `TZ` | No | system | Timezone for cron schedules and datetime display |
 
 ## Privacy

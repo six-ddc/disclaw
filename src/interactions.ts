@@ -87,7 +87,7 @@ function requireThreadSession(interaction: ChatInputCommandInteraction) {
 // COMMAND HANDLERS
 // =========================================================================
 
-export async function handleConfig(interaction: ChatInputCommandInteraction) {
+export async function handleCd(interaction: ChatInputCommandInteraction) {
     const isThread = interaction.channel?.isThread();
 
     // Thread context: require an active session
