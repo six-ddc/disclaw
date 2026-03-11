@@ -15,7 +15,7 @@ import type { ClaudeMessage } from './message-converter.js';
 import type { ButtonInteraction } from 'discord.js';
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
-import { getThreadMapping } from './db.js';
+import { getThreadMapping, savePagerMessage, getPagerMessage } from './db.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('pager');
@@ -41,8 +41,8 @@ export interface ToolPager {
     handleMessage(msg: ClaudeMessage): void;
     /** Track raw SDK messages to capture first message UUID for offset calculation */
     trackRawMessage(sdkMessage: { type: string; uuid?: string }): void;
-    /** Finalize: switch buttons to persistent SDK-backed mode, free memory */
-    destroy(sessionId: string, workingDir: string): void;
+    /** Finalize: remove buttons, save metadata to DB for reaction-triggered restore */
+    destroy(sessionId: string, workingDir: string): Promise<void>;
 }
 
 // =========================================================================
@@ -535,15 +535,16 @@ export function createToolPager(threadId: string): ToolPager {
                 log(`[${id}] Parsed ${total} pages from round (Phase 1 had ${state.pages.length}), showing page ${pageIdx}`);
 
                 if (total > 0) {
-                    const embed = buildPageEmbed(pages[pageIdx]!, pageIdx, total);
-                    const components = total > 1
-                        ? [buildPersistentButtons(sessionId, pageIdx, total, msgOffset, msgLimit)]
-                        : [];
+                    // Show last page without buttons — users can react to restore navigation
+                    const lastIdx = total - 1;
+                    const embed = buildPageEmbed(pages[lastIdx]!, lastIdx, total);
                     await editRichMessage(state.threadId, state.messageId, {
                         embeds: [embed],
-                        components,
+                        components: [],
                     });
-                    log(`[${id}] Finalized: session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, pages=${total}`);
+                    // Save metadata to DB for reaction-triggered restore
+                    savePagerMessage(state.messageId, state.threadId, sessionId, msgOffset, msgLimit, workingDir);
+                    log(`[${id}] Finalized (no buttons): session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, pages=${total}`);
                 }
 
                 // Free memory only after successful finalization
@@ -593,6 +594,38 @@ async function findLastRoundBounds(sessionId: string, dir?: string): Promise<{ o
     } catch (e) {
         log.warn(`findLastRoundBounds failed: ${e}`);
         return { offset: 0, limit: 0 };
+    }
+}
+
+/**
+ * Restore pager navigation buttons on a finalized pager message (triggered by user reaction).
+ * Returns true if buttons were restored, false if message not found or no pages.
+ */
+export async function restorePagerButtons(messageId: string): Promise<boolean> {
+    const pagerData = getPagerMessage(messageId);
+    if (!pagerData) return false;
+
+    try {
+        const result = await renderPersistentPage(
+            pagerData.session_id, Infinity,
+            pagerData.msg_offset, pagerData.msg_limit,
+            pagerData.working_dir || undefined,
+        );
+        if (!result || result.total <= 1) return false;
+
+        const row = buildPersistentButtons(
+            pagerData.session_id, result.pageIdx, result.total,
+            pagerData.msg_offset, pagerData.msg_limit,
+        );
+        await editRichMessage(pagerData.thread_id, messageId, {
+            embeds: [result.embed],
+            components: [row],
+        });
+        log(`Restored pager buttons: message=${messageId}, pages=${result.total}`);
+        return true;
+    } catch (e) {
+        log.error(`Failed to restore pager buttons: ${e}`);
+        return false;
     }
 }
 

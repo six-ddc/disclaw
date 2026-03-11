@@ -98,15 +98,24 @@ try {
     db.run(`ALTER TABLE cron_jobs ADD COLUMN name TEXT`);
 } catch {} // Column may already exist
 
-// Add verbose column to cron_jobs table (migration, default 0 = off)
-try {
-    db.run(`ALTER TABLE cron_jobs ADD COLUMN verbose INTEGER DEFAULT 0`);
-} catch {} // Column may already exist
-
 // Add last_run_at column to cron_jobs table (migration)
 try {
     db.run(`ALTER TABLE cron_jobs ADD COLUMN last_run_at TEXT`);
 } catch {} // Column may already exist
+
+// Create pager_messages table — stores pager embed metadata for reaction-triggered restore
+db.run(`
+    CREATE TABLE IF NOT EXISTS pager_messages (
+        message_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        msg_offset INTEGER NOT NULL,
+        msg_limit INTEGER NOT NULL,
+        working_dir TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_pager_thread ON pager_messages(thread_id)`);
 
 console.log(`[db] SQLite database ready at ${DB_PATH}`);
 
@@ -240,7 +249,6 @@ export interface CronJob {
     prompt: string;
     enabled: number;
     name: string | null;
-    verbose: number;
     last_run_at: string | null;
 }
 
@@ -271,22 +279,18 @@ export function updateCronJob(jobId: string, fields: { name?: string; schedule?:
 }
 
 export function getCronJob(jobId: string): CronJob | null {
-    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose, last_run_at FROM cron_jobs WHERE job_id = ?')
+    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, last_run_at FROM cron_jobs WHERE job_id = ?')
         .get(jobId) as CronJob | null;
 }
 
 export function getCronJobByThread(threadId: string): CronJob | null {
-    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose, last_run_at FROM cron_jobs WHERE thread_id = ?')
+    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, last_run_at FROM cron_jobs WHERE thread_id = ?')
         .get(threadId) as CronJob | null;
 }
 
 export function listCronJobs(): CronJob[] {
-    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, verbose, last_run_at FROM cron_jobs ORDER BY created_at DESC')
+    return db.query('SELECT job_id, thread_id, creator_id, schedule, prompt, enabled, name, last_run_at FROM cron_jobs ORDER BY created_at DESC')
         .all() as CronJob[];
-}
-
-export function setCronJobVerbose(jobId: string, verbose: boolean): void {
-    db.run('UPDATE cron_jobs SET verbose = ? WHERE job_id = ?', [verbose ? 1 : 0, jobId]);
 }
 
 export function setCronJobEnabled(jobId: string, enabled: boolean): void {
@@ -299,4 +303,37 @@ export function setCronJobLastRun(jobId: string): void {
 
 export function deleteCronJob(jobId: string): void {
     db.run('DELETE FROM cron_jobs WHERE job_id = ?', [jobId]);
+}
+
+// =========================================================================
+// PAGER MESSAGES
+// =========================================================================
+
+export interface PagerMessage {
+    message_id: string;
+    thread_id: string;
+    session_id: string;
+    msg_offset: number;
+    msg_limit: number;
+    working_dir: string | null;
+}
+
+export function savePagerMessage(messageId: string, threadId: string, sessionId: string, msgOffset: number, msgLimit: number, workingDir?: string): void {
+    db.run(
+        'INSERT OR REPLACE INTO pager_messages (message_id, thread_id, session_id, msg_offset, msg_limit, working_dir) VALUES (?, ?, ?, ?, ?, ?)',
+        [messageId, threadId, sessionId, msgOffset, msgLimit, workingDir || null]
+    );
+    // Keep only last 10 per thread — delete oldest beyond limit
+    db.run(
+        `DELETE FROM pager_messages WHERE message_id IN (
+            SELECT message_id FROM pager_messages WHERE thread_id = ?
+            ORDER BY created_at DESC LIMIT -1 OFFSET 10
+        )`,
+        [threadId]
+    );
+}
+
+export function getPagerMessage(messageId: string): PagerMessage | null {
+    return db.query('SELECT message_id, thread_id, session_id, msg_offset, msg_limit, working_dir FROM pager_messages WHERE message_id = ?')
+        .get(messageId) as PagerMessage | null;
 }

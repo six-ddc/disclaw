@@ -11,6 +11,7 @@ import {
     Events,
     Message,
     MessageFlags,
+    Partials,
     TextChannel,
     ThreadAutoArchiveDuration,
     SlashCommandBuilder,
@@ -35,7 +36,7 @@ import {
 } from './interactions.js';
 import { handleDirPickInteraction } from './dir-picker.js';
 import { handleHistoryInteraction } from './history.js';
-import { handlePagerInteraction } from './tool-pager.js';
+import { handlePagerInteraction, restorePagerButtons } from './tool-pager.js';
 import { initCronScheduler, createCronMcpServer, getCronScheduler } from './cron.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
@@ -85,7 +86,9 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions,
     ],
+    partials: [Partials.Reaction, Partials.Message],
 });
 
 client.once(Events.ClientReady, async (c) => {
@@ -182,6 +185,29 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
         // Unknown button
         await interaction.reply({ content: 'This button has expired.', flags: MessageFlags.Ephemeral });
+    }
+});
+
+// Handle reactions on pager messages — restore navigation buttons
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+    try {
+        // Ignore bot's own reactions (e.g. 👀 eyes indicator)
+        if (user.id === client.user?.id) return;
+
+        // Partial messages (uncached) won't have author — fetch full message
+        const message = reaction.message.partial
+            ? await reaction.message.fetch()
+            : reaction.message;
+
+        // Only handle reactions on bot's own messages
+        if (message.author?.id !== client.user?.id) return;
+
+        const restored = await restorePagerButtons(message.id);
+        if (restored) {
+            log(`Pager buttons restored via reaction on message=${message.id}`);
+        }
+    } catch (e) {
+        log.error(`Failed to restore pager on reaction: ${e}`);
     }
 });
 

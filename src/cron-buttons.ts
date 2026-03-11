@@ -12,7 +12,7 @@ import {
     MessageFlags,
     type ButtonInteraction,
 } from 'discord.js';
-import { getCronJob, setCronJobVerbose, cronJobDisplayName, type CronJob } from './db.js';
+import { getCronJob, cronJobDisplayName, type CronJob } from './db.js';
 import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import { getCronScheduler } from './cron.js';
 import { createLogger } from './logger.js';
@@ -26,11 +26,9 @@ function buildControlEmbed(job: CronJob, nextRun?: Date | null): EmbedData {
     const status = job.enabled ? 'Active' : 'Paused';
     const statusIcon = job.enabled ? '\u{1F7E2}' : '\u{23F8}\u{FE0F}';
 
-    const verboseLabel = job.verbose ? '📢 On' : '🔇 Off';
     const fields = [
         { name: 'Schedule', value: `\`${job.schedule}\``, inline: true },
         { name: 'Status', value: `${statusIcon} ${status}`, inline: true },
-        { name: 'Verbose', value: verboseLabel, inline: true },
     ];
 
     if (nextRun) {
@@ -84,11 +82,6 @@ function buildButtons(job: CronJob): ActionRowBuilder<ButtonBuilder> {
             .setLabel('Run Now')
             .setEmoji('\u{25B6}')
             .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-            .setCustomId(`cron:${job.job_id}:verbose`)
-            .setLabel(job.verbose ? 'Verbose: On' : 'Verbose: Off')
-            .setEmoji(job.verbose ? '\u{1F50A}' : '\u{1F507}')
-            .setStyle(job.verbose ? ButtonStyle.Success : ButtonStyle.Secondary),
         new ButtonBuilder()
             .setCustomId(`cron:${job.job_id}:delete`)
             .setLabel('Delete')
@@ -167,15 +160,6 @@ export async function handleCronInteraction(interaction: ButtonInteraction): Pro
             flags: MessageFlags.Ephemeral,
         });
         log(`Job ${jobId} manual run by ${interaction.user.tag}`);
-    } else if (action === 'verbose') {
-        const newVerbose = !job.verbose;
-        setCronJobVerbose(jobId, newVerbose);
-        const updated = getCronJob(jobId)!;
-        const nextRun = scheduler.getNextRun(jobId);
-        const embed = buildControlEmbed(updated, nextRun);
-        const row = buildButtons(updated);
-        await interaction.update({ embeds: [embed], components: [row] });
-        log(`Job ${jobId} verbose ${newVerbose ? 'enabled' : 'disabled'} by ${interaction.user.tag}`);
     } else if (action === 'delete') {
         scheduler.delete(jobId);
         await interaction.update({

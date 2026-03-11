@@ -36,8 +36,6 @@ export interface ClaudeJob {
     resumeSessionAt?: string;
     /** Factory that creates fresh MCP servers for each query() call (instances are single-use) */
     createMcpServers?: () => Record<string, McpServerConfig>;
-    /** When false, only show the final result message (hide tool_use, tool_result, thinking etc.) */
-    verbose?: boolean;
     /** When false, don't persist session to filesystem */
     persistSession?: boolean;
     /** SDK permission mode override (per-thread from DB) */
@@ -158,10 +156,9 @@ class JobRunner {
         log(`Session: ${job.sessionId || '(auto)'}, Resume: ${job.resume}`);
 
         const sender = createClaudeSender(job.threadId);
-        // Resolve display mode: job-level > DB mapping > cron verbose compat > default
+        // Resolve display mode: DB mapping > default
         const mapping = getThreadMapping(job.threadId);
-        const displayMode: DisplayMode = job.verbose === false ? 'simple'
-            : (mapping?.display_mode as DisplayMode) || 'verbose';
+        const displayMode: DisplayMode = (mapping?.display_mode as DisplayMode) || 'verbose';
         const pager = displayMode === 'pager' ? createToolPager(job.threadId) : null;
         let lastResultText = '';
 
@@ -265,8 +262,8 @@ class JobRunner {
             if (job.eyesReaction) {
                 removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
             }
-            // Finalize pager: switch to persistent SDK-backed buttons (async, non-blocking)
-            pager?.destroy(resultSessionId, job.workingDir || process.cwd());
+            // Finalize pager: remove buttons, save metadata to DB
+            await pager?.destroy(resultSessionId, job.workingDir || process.cwd());
 
             // If session ID changed (e.g. fork), update DB mapping
             // Skip when no sessionId was provided (e.g. cron jobs with persistSession: false)
@@ -300,7 +297,7 @@ class JobRunner {
             if (job.eyesReaction) {
                 removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
             }
-            pager?.destroy(job.sessionId || '', job.workingDir || process.cwd());
+            await pager?.destroy(job.sessionId || '', job.workingDir || process.cwd());
 
             // Update status message to error state
             if (job.statusMessageId && job.parentChannelId) {

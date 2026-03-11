@@ -152,7 +152,6 @@ export class CronScheduler {
             username: 'cron',
             workingDir,
             model: mapping?.model || undefined,
-            verbose: !!job.verbose,
             onComplete: (error) => {
                 if (error) {
                     const count = (this.failures.get(jobId) || 0) + 1;
@@ -261,8 +260,8 @@ export class CronScheduler {
         // Store thread mapping (empty session_id — first message or cron execution will create one)
         // Pre-set title to prevent auto-title generation from overriding it
         db.run(
-            'INSERT INTO threads (thread_id, session_id, working_dir, model, title) VALUES (?, ?, ?, ?, ?)',
-            [thread.id, '', params.workingDir, params.model || null, threadName]
+            'INSERT INTO threads (thread_id, session_id, working_dir, model, title, display_mode) VALUES (?, ?, ?, ?, ?, ?)',
+            [thread.id, '', params.workingDir, params.model || null, threadName, 'simple']
         );
 
         // Store cron job
