@@ -6,20 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Disclaw is a Discord bot that bridges Discord with Claude Code via the Agent SDK, enabling thread-based AI conversations with multimodal support. Architecture: `Discord Gateway → Bot → In-process JobRunner → Claude Agent SDK`. Single-process, no external dependencies beyond Discord. Runs locally with no exposed ports (outbound Discord gateway only).
 
-## Development Commands
+## Commands
 
 ```bash
 # Install dependencies
 bun install
 
-# Start
-bun run start
+# Service management (auto-detects Linux systemd / macOS launchd)
+make install       # Register as service (auto-detects project dir and bun path)
+make start         # Start the service
+make stop          # Stop the service
+make restart       # Restart the service
+make status        # Show service status
+make logs          # Follow service logs
+make deploy        # Type-check + restart
 
-# Development with hot reload
-bun run dev
-
-# Type checking (no emit - Bun runs TS natively)
-bunx tsc --noEmit
+# Development
+make dev           # Start with hot reload (bun --watch, not as service)
+bunx tsc --noEmit  # Type checking
 ```
 
 There are no tests or linting configured.
@@ -69,9 +73,18 @@ There are no tests or linting configured.
 - **TypeScript:** Strict mode with `noUncheckedIndexedAccess` and `noImplicitOverride` enabled; `noEmit: true` (type checking only)
 - **Key dependencies:** discord.js, @anthropic-ai/claude-agent-sdk, croner (cron scheduling)
 
+## Service
+
+Cross-platform service management in `service/`. Auto-detects Linux (systemd) / macOS (launchd):
+- `manage.sh` — Cross-platform service manager (install/uninstall/start/stop/restart/status/logs)
+- `disclaw.service.template` — Linux systemd unit template (`__PROJECT_DIR__`, `__BUN_PATH__` placeholders)
+- `com.disclaw.bot.plist` — macOS LaunchAgent plist template (`__BUN_PATH__`, `__WORKING_DIR__`, `__LOG_DIR__` placeholders)
+
+`make install` generates the platform-specific service file from the template. Linux: writes to `/etc/systemd/system/` (requires sudo). macOS: writes to `~/Library/LaunchAgents/` (user-level, no sudo).
+
 ## Logging
 
-Uses `pino` (`src/logger.ts`). Output goes to both console and `logs/YYYY-MM-DD.log` (JSON). discord.js has built-in rate limit retry — do not add custom retry wrappers on top.
+Uses `pino` (`src/logger.ts`). Output goes to both console and `logs/YYYY-MM-DD.log` (JSON). When running as a service, logs are also available via `make logs` (Linux: journalctl, macOS: tail logs/). discord.js has built-in rate limit retry — do not add custom retry wrappers on top.
 
 ## Environment Variables
 

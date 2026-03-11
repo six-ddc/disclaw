@@ -1,0 +1,14 @@
+[Unit]
+Description=Disclaw Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__BUN_PATH__ run src/bot.ts
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=__PROJECT_DIR__/.env
+
+[Install]
+WantedBy=multi-user.target
