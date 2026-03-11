@@ -23,6 +23,7 @@ const TIMEZONE = process.env.TZ;
 
 /** Build the control panel embed for a cron job */
 function buildControlEmbed(job: CronJob, nextRun?: Date | null): EmbedData {
+    log.debug(`Building control embed for job ${job.job_id} (enabled=${job.enabled})`);
     const status = job.enabled ? 'Active' : 'Paused';
     const statusIcon = job.enabled ? '\u{1F7E2}' : '\u{23F8}\u{FE0F}';
 
@@ -56,6 +57,7 @@ function buildControlEmbed(job: CronJob, nextRun?: Date | null): EmbedData {
 
 /** Build action row with buttons */
 function buildButtons(job: CronJob): ActionRowBuilder<ButtonBuilder> {
+    log.debug(`Building buttons for job ${job.job_id} (enabled=${job.enabled})`);
     const row = new ActionRowBuilder<ButtonBuilder>();
 
     if (job.enabled) {
@@ -105,6 +107,7 @@ export async function sendCronControlPanel(
         embeds: [embed],
         components: [row],
     });
+    log(`Sent control panel for job ${job.job_id} to thread ${threadId}`);
 }
 
 /** Handle cron button interactions. Returns true if handled. */
@@ -118,8 +121,11 @@ export async function handleCronInteraction(interaction: ButtonInteraction): Pro
     const jobId = parts[1]!;
     const action = parts[2]!;
 
+    log.debug(`Handling cron button: action=${action}, jobId=${jobId}, user=${interaction.user.tag}`);
+
     const job = getCronJob(jobId);
     if (!job) {
+        log.warn(`Button interaction for nonexistent job ${jobId} by ${interaction.user.tag}`);
         await interaction.reply({
             content: 'This scheduled task no longer exists.',
             flags: MessageFlags.Ephemeral,
@@ -129,6 +135,7 @@ export async function handleCronInteraction(interaction: ButtonInteraction): Pro
 
     // Permission check: only creator can manage
     if (interaction.user.id !== job.creator_id) {
+        log.warn(`Permission denied: user ${interaction.user.tag} tried to ${action} job ${jobId} (creator=${job.creator_id})`);
         await interaction.reply({
             content: 'Only the creator of this task can manage it.',
             flags: MessageFlags.Ephemeral,
@@ -173,6 +180,7 @@ export async function handleCronInteraction(interaction: ButtonInteraction): Pro
         });
         log(`Job ${jobId} deleted by ${interaction.user.tag}`);
     } else {
+        log.warn(`Unknown cron button action "${action}" for job ${jobId}`);
         await interaction.reply({
             content: 'Unknown action.',
             flags: MessageFlags.Ephemeral,

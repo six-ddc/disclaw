@@ -59,6 +59,7 @@ function extractText(message: unknown): string {
 /** Build the embed + components for the current page. */
 function buildHistoryMessage(state: HistoryState) {
     const { id, entries, page, totalPages } = state;
+    log.debug(`Building history message: id=${id}, page=${page + 1}/${totalPages}, entries=${entries.length}`);
     const start = page * MESSAGES_PER_PAGE;
     const pageEntries = entries.slice(start, start + MESSAGES_PER_PAGE);
 
@@ -105,11 +106,13 @@ function buildHistoryMessage(state: HistoryState) {
 
 /** Send a paginated history embed to a thread. Returns the message ID. */
 export async function sendHistory(threadId: string, sessionId: string, workingDir?: string): Promise<string | null> {
+    log(`Session history requested: thread=${threadId}, session=${sessionId}, workingDir=${workingDir || '(default)'}`);
     let rawMessages;
     try {
         rawMessages = await getSessionMessages(sessionId, { dir: workingDir });
+        log.debug(`Fetched ${rawMessages.length} raw messages for session=${sessionId}`);
     } catch (err) {
-        log(`Failed to fetch session messages: ${err}`);
+        log.error(`Failed to fetch session messages for session=${sessionId}: ${err}`);
         return null;
     }
 
@@ -122,7 +125,7 @@ export async function sendHistory(threadId: string, sessionId: string, workingDi
     }
 
     if (entries.length === 0) {
-        log('No messages to display');
+        log.warn(`No displayable messages in session=${sessionId} for thread=${threadId}`);
         return null;
     }
 
@@ -145,20 +148,22 @@ export async function sendHistory(threadId: string, sessionId: string, workingDi
     try {
         state.messageId = await sendRichMessage(threadId, body);
     } catch (err) {
-        log(`Failed to send history: ${err}`);
+        log.error(`Failed to send history embed to thread=${threadId}: ${err}`);
         return null;
     }
 
     // Register for pagination if multiple pages
     if (totalPages > 1) {
         state.timeout = setTimeout(() => {
+            log(`History view timed out: id=${id}, thread=${threadId}`);
             activeHistories.delete(id);
             editRichMessage(threadId, state.messageId, { components: [] }).catch(() => {});
         }, TIMEOUT_MS);
         activeHistories.set(id, state);
+        log.debug(`History pagination registered: id=${id}, timeout=${TIMEOUT_MS}ms`);
     }
 
-    log(`History sent to ${threadId}: ${entries.length} messages, ${totalPages} pages`);
+    log(`Session history loaded: thread=${threadId}, session=${sessionId}, ${entries.length} messages, ${totalPages} pages, startPage=${page + 1}`);
     return state.messageId;
 }
 
@@ -179,15 +184,18 @@ export async function handleHistoryInteraction(interaction: {
 
     const state = activeHistories.get(id);
     if (!state) {
+        log.warn(`History interaction for expired view: id=${id}, action=${action}`);
         await interaction.update({ content: 'This history view has expired.', embeds: [], components: [] });
         return true;
     }
 
+    const prevPage = state.page;
     if (action === 'prev') {
         state.page = Math.max(0, state.page - 1);
     } else if (action === 'next') {
         state.page = Math.min(state.totalPages - 1, state.page + 1);
     }
+    log(`History page navigation: id=${id}, thread=${state.threadId}, ${prevPage + 1}→${state.page + 1}/${state.totalPages}, action=${action}`);
 
     await interaction.update(buildHistoryMessage(state));
     return true;

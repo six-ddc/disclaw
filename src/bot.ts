@@ -56,14 +56,17 @@ function resolveWorkingDir(message: string, channelId: string): { workingDir: st
         }
         const validationError = validateWorkingDir(dir);
         if (validationError) {
+            log.debug(`Working dir path override rejected: dir=${dir} channel=${channelId} error="${validationError}"`);
             return {
                 workingDir: '',
                 cleanedMessage: message.slice(pathMatch[0].length),
                 error: validationError
             };
         }
+        const resolved = resolve(dir);
+        log.debug(`Working dir resolved via [path] override: ${resolved} channel=${channelId}`);
         return {
-            workingDir: resolve(dir),
+            workingDir: resolved,
             cleanedMessage: message.slice(pathMatch[0].length)
         };
     }
@@ -71,12 +74,15 @@ function resolveWorkingDir(message: string, channelId: string): { workingDir: st
     // Check channel config (cached)
     const channelConfig = getChannelConfigCached(channelId);
     if (channelConfig?.working_dir) {
+        log.debug(`Working dir resolved via channel config: ${channelConfig.working_dir} channel=${channelId}`);
         return { workingDir: channelConfig.working_dir, cleanedMessage: message };
     }
 
     // Fall back to env or cwd
+    const fallback = process.env.CLAUDE_WORKING_DIR || process.cwd();
+    log.debug(`Working dir resolved via fallback: ${fallback} channel=${channelId}`);
     return {
-        workingDir: process.env.CLAUDE_WORKING_DIR || process.cwd(),
+        workingDir: fallback,
         cleanedMessage: message
     };
 }
@@ -139,6 +145,7 @@ client.once(Events.ClientReady, async (c) => {
 
     await c.application?.commands.create(command);
     log('Slash commands registered');
+    log(`Bot ready: guilds=${c.guilds.cache.size}`);
 
 });
 
@@ -147,6 +154,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     // Handle /disclaw slash commands
     if (interaction.isChatInputCommand() && interaction.commandName === 'disclaw') {
         const subcommand = interaction.options.getSubcommand();
+        log(`Slash command: /disclaw ${subcommand} user=${interaction.user.tag} channel=${interaction.channelId}`);
         if (subcommand === 'cd') {
             await handleCd(interaction);
         } else if (subcommand === 'clear') {
@@ -184,6 +192,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         if (await handlePagerInteraction(interaction)) return;
 
         // Unknown button
+        log.warn(`Unknown button interaction: customId=${interaction.customId} user=${interaction.user.tag} channel=${interaction.channelId}`);
         await interaction.reply({ content: 'This button has expired.', flags: MessageFlags.Ephemeral });
     }
 });
@@ -193,6 +202,7 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
     try {
         // Ignore bot's own reactions (e.g. 👀 eyes indicator)
         if (user.id === client.user?.id) return;
+        log.debug(`Reaction received: emoji=${reaction.emoji.name} user=${user.tag} message=${reaction.message.id}`);
 
         // Partial messages (uncached) won't have author — fetch full message
         const message = reaction.message.partial
@@ -229,18 +239,21 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
         if (!mapping) {
             // Not a thread we created, ignore
+            log.debug(`Ignoring message in untracked thread: thread=${thread.id} user=${message.author.tag} messageId=${message.id}`);
             return;
         }
 
-        log(`Thread message from ${message.author.tag}`);
+        log(`Thread message: user=${message.author.tag} thread=${thread.id} messageId=${message.id} sessionId=${mapping.session_id || '(empty)'}`);
 
         // React with eyes to acknowledge receipt
         addReaction(thread.id, message.id, '👀').catch(() => {});
 
         // Show typing indicator
+        log.debug(`Sending typing indicator: thread=${thread.id}`);
         await thread.sendTyping();
 
         // Extract multimodal content (images, files, replies)
+        log.debug(`Extracting multimodal content: thread=${thread.id} attachments=${message.attachments.size}`);
         const multimodalPrompt = await extractMessageContent(message);
         const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
@@ -250,7 +263,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
             process.env.CLAUDE_WORKING_DIR ||
             process.cwd());
 
+        log.debug(`Thread working dir resolved: ${workingDir} thread=${thread.id}`);
+
         const parentId = thread.parentId || '';
+        log(`Job submitted: thread=${thread.id} user=${message.author.tag} workingDir=${workingDir} model=${mapping.model || 'default'} permissionMode=${mapping.permission_mode || 'default'}`);
         runner.submit({
             prompt,
             threadId: thread.id,
@@ -278,7 +294,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
     // =========================================================================
     if (!isMentioned) return;
 
-    log(`New mention from ${message.author.tag}`);
+    log(`New mention: user=${message.author.tag} channel=${message.channelId} messageId=${message.id}`);
 
     // React with eyes to acknowledge receipt
     addReaction(message.channelId, message.id, '👀').catch(() => {});
@@ -289,13 +305,15 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
     // If path override validation failed, reply with error
     if (workingDirError) {
+        log.warn(`Working dir validation failed: user=${message.author.tag} channel=${message.channelId} error="${workingDirError}"`);
         await message.reply(workingDirError);
         return;
     }
 
-    log(`Working directory: ${workingDir}`);
+    log(`Working directory resolved: ${workingDir} channel=${message.channelId}`);
 
     // Extract multimodal content (images, files, replies) using the cleaned text
+    log.debug(`Extracting multimodal content: channel=${message.channelId} attachments=${message.attachments.size}`);
     const multimodalPrompt = await extractMessageContent(message, cleanedMessage);
     const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
     const displayText = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt.textSummary;
@@ -319,7 +337,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             await thread.send(`**${message.author.tag}:** ${cleanedMessage}`);
         }
     } catch (error) {
-        log(`Failed to create thread: ${error}`);
+        log.error(`Failed to create thread: channel=${message.channelId} user=${message.author.tag} error=${error}`);
         await message.reply('Failed to start thread. Try again?');
         return;
     }
@@ -329,10 +347,12 @@ client.on(Events.MessageCreate, async (message: Message) => {
         [thread.id, '', workingDir]
     );
 
-    log(`Created thread ${thread.id}`);
+    log(`Thread created: thread=${thread.id} channel=${message.channelId} user=${message.author.tag} workingDir=${workingDir}`);
 
+    log.debug(`Sending typing indicator: thread=${thread.id}`);
     await thread.sendTyping();
 
+    log(`Job submitted: thread=${thread.id} user=${message.author.tag} workingDir=${workingDir} resume=false`);
     runner.submit({
         prompt,
         threadId: thread.id,
@@ -350,17 +370,20 @@ client.on(Events.MessageCreate, async (message: Message) => {
 // Start the bot
 const token = process.env.DISCORD_BOT_TOKEN;
 if (!token) {
-    console.error('DISCORD_BOT_TOKEN required');
+    log.error('DISCORD_BOT_TOKEN required — exiting');
     process.exit(1);
 }
 
+log('Bot starting — logging in to Discord...');
 client.login(token);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-    log('Shutting down...');
-    try { getCronScheduler().stopAll(); } catch {}
+    log('Shutting down (SIGINT received)...');
+    try { getCronScheduler().stopAll(); } catch (e) { log.warn(`Error stopping cron scheduler: ${e}`); }
+    log('Draining runner...');
     await runner.drain();
+    log('Runner drained, destroying client');
     client.destroy();
     process.exit(0);
 });

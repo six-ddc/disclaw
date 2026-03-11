@@ -89,10 +89,12 @@ export function createCanUseTool(threadId: string): CanUseTool {
     ): Promise<PermissionResult> => {
         // AskUserQuestion — always handle interactively
         if (toolName === 'AskUserQuestion') {
+            log(`AskUserQuestion prompted in thread ${threadId}`);
             return handleAskUserQuestion(threadId, input);
         }
 
         // Show approval UI in Discord, pass suggestions for "Always Allow"
+        log(`Tool approval requested: ${toolName} in thread ${threadId}`);
         return requestToolApproval(threadId, toolName, input, options?.suggestions);
     };
 }
@@ -107,15 +109,18 @@ async function handleAskUserQuestion(
 ): Promise<PermissionResult> {
     const questions = (input.questions || []) as AskUserQuestionItem[];
     if (questions.length === 0) {
+        log.debug(`AskUserQuestion in thread ${threadId} has no questions, auto-allowing`);
         return { behavior: 'allow', updatedInput: input };
     }
 
     const requestId = crypto.randomUUID().slice(0, 8);
+    log(`AskUserQuestion created: requestId=${requestId}, thread=${threadId}, ${questions.length} question(s)`);
 
     return new Promise<PermissionResult>((resolve) => {
         const timeout = setTimeout(() => {
             const req = pendingRequests.get(requestId);
             if (req) {
+                log.warn(`AskUserQuestion timed out after ${REQUEST_TIMEOUT_MS / 1000}s: requestId=${requestId}, thread=${threadId}`);
                 pendingRequests.delete(requestId);
                 expireRequest(req);
                 resolve({ behavior: 'deny', message: 'Timed out waiting for user response.' });
@@ -148,6 +153,8 @@ async function sendQuestionUI(request: PendingRequest): Promise<void> {
 
     const q = questions[currentIndex];
     if (!q) return;
+
+    log.debug(`Rendering question UI: requestId=${requestId}, question ${currentIndex + 1}/${questions.length}, thread=${threadId}`);
 
     const total = questions.length;
 
@@ -254,7 +261,7 @@ async function sendQuestionUI(request: PendingRequest): Promise<void> {
             request.currentMsgId = msgId;
         }
     } catch (err) {
-        log(`Failed to send/update question UI: ${err}`);
+        log.error(`Failed to send/update question UI: requestId=${requestId}, thread=${threadId}, error=${err}`);
     }
 }
 
@@ -269,11 +276,13 @@ async function requestToolApproval(
     suggestions?: PermissionUpdate[],
 ): Promise<PermissionResult> {
     const requestId = crypto.randomUUID().slice(0, 8);
+    log(`Tool approval UI created: requestId=${requestId}, tool=${toolName}, thread=${threadId}${suggestions?.length ? `, ${suggestions.length} suggestion(s)` : ''}`);
 
     return new Promise<PermissionResult>((resolve) => {
         const timeout = setTimeout(() => {
             const req = pendingRequests.get(requestId);
             if (req) {
+                log.warn(`Tool approval timed out after ${REQUEST_TIMEOUT_MS / 1000}s: requestId=${requestId}, tool=${toolName}, thread=${threadId}`);
                 pendingRequests.delete(requestId);
                 expireRequest(req);
                 resolve({ behavior: 'deny', message: 'Timed out waiting for approval.' });
@@ -298,6 +307,7 @@ async function requestToolApproval(
 
 async function sendApprovalUI(request: PendingRequest): Promise<void> {
     const { threadId, requestId, toolName, toolInput } = request;
+    log.debug(`Rendering approval UI: requestId=${requestId}, tool=${toolName}, thread=${threadId}`);
 
     // Build input preview
     let preview = '';
@@ -334,7 +344,7 @@ async function sendApprovalUI(request: PendingRequest): Promise<void> {
         const msgId = await sendRichMessage(threadId, { embeds: [embed], components: [row] });
         request.currentMsgId = msgId;
     } catch (err) {
-        log(`Failed to send approval UI: ${err}`);
+        log.error(`Failed to send approval UI: requestId=${requestId}, tool=${toolName}, thread=${threadId}, error=${err}`);
     }
 }
 
@@ -388,6 +398,7 @@ async function handleAskButton(interaction: ButtonInteraction): Promise<boolean>
     const request = pendingRequests.get(requestId);
 
     if (!request || request.type !== 'ask_user') {
+        log.debug(`Ask button interaction for expired request: requestId=${requestId}`);
         await interaction.reply({ content: 'This question has expired.', ephemeral: true });
         return true;
     }
@@ -402,6 +413,7 @@ async function handleAskButton(interaction: ButtonInteraction): Promise<boolean>
         } else if (dir === 'next' && request.currentIndex! < request.questions!.length - 1) {
             request.currentIndex!++;
         }
+        log.debug(`Question navigation: requestId=${requestId}, direction=${dir}, now at index ${request.currentIndex}`);
         await interaction.deferUpdate();
         await sendQuestionUI(request);
         return true;
@@ -411,6 +423,7 @@ async function handleAskButton(interaction: ButtonInteraction): Promise<boolean>
     if (segment === 'submit') {
         const allAnswered = request.questions!.every(q => request.answers![q.question] !== undefined);
         if (!allAnswered) {
+            log.debug(`Submit attempt with unanswered questions: requestId=${requestId}`);
             await interaction.reply({ content: 'Please answer all questions first.', ephemeral: true });
             return true;
         }
@@ -418,6 +431,7 @@ async function handleAskButton(interaction: ButtonInteraction): Promise<boolean>
         clearTimeout(request.timeout);
         await interaction.deferUpdate();
         await disableComponents(request, `Answered ${request.questions!.length} question(s)`);
+        log(`User submitted all answers: requestId=${requestId}, thread=${request.threadId}, ${request.questions!.length} question(s)`);
         request.resolve({
             behavior: 'allow',
             updatedInput: {
@@ -436,6 +450,7 @@ async function handleAskButton(interaction: ButtonInteraction): Promise<boolean>
 
     if (action === 'other') {
         // Show modal for free text input
+        log.debug(`Showing "Other..." modal: requestId=${requestId}, question index=${request.currentIndex}`);
         const modal = new ModalBuilder()
             .setCustomId(`ask:${requestId}:q${request.currentIndex}:modal`)
             .setTitle(truncateCodePoints(q.question, 45));
@@ -456,6 +471,7 @@ async function handleAskButton(interaction: ButtonInteraction): Promise<boolean>
     if (isNaN(optIndex) || !q.options[optIndex]) return false;
 
     request.answers![q.question] = q.options[optIndex]!.label;
+    log.debug(`Question answered via button: requestId=${requestId}, question="${q.question}", answer="${q.options[optIndex]!.label}"`);
     await interaction.deferUpdate();
     await sendQuestionUI(request);
     return true;
@@ -471,6 +487,7 @@ async function handleAskSelect(interaction: StringSelectMenuInteraction): Promis
     const request = pendingRequests.get(requestId);
 
     if (!request || request.type !== 'ask_user') {
+        log.debug(`Select menu interaction for expired request: requestId=${requestId}`);
         await interaction.reply({ content: 'This question has expired.', ephemeral: true });
         return true;
     }
@@ -484,6 +501,7 @@ async function handleAskSelect(interaction: StringSelectMenuInteraction): Promis
         .filter(Boolean) as string[];
 
     request.answers![q.question] = selectedLabels.join(', ');
+    log.debug(`Question answered via select menu: requestId=${requestId}, question="${q.question}", selected=${selectedLabels.length} option(s)`);
 
     await interaction.deferUpdate();
     await sendQuestionUI(request);
@@ -502,6 +520,7 @@ async function handleApproveButton(interaction: ButtonInteraction): Promise<bool
     const request = pendingRequests.get(requestId);
 
     if (!request || request.type !== 'approval') {
+        log.debug(`Approve button interaction for expired request: requestId=${requestId}`);
         await interaction.reply({ content: 'This approval has expired.', ephemeral: true });
         return true;
     }
@@ -511,6 +530,7 @@ async function handleApproveButton(interaction: ButtonInteraction): Promise<bool
         clearTimeout(request.timeout);
         await interaction.deferUpdate();
         await disableComponents(request, `Allowed by ${interaction.user.tag}`);
+        log(`User approved tool: tool=${request.toolName}, requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}`);
         request.resolve({ behavior: 'allow', updatedInput: request.toolInput });
         return true;
     }
@@ -521,6 +541,7 @@ async function handleApproveButton(interaction: ButtonInteraction): Promise<bool
 
         await interaction.deferUpdate();
         await disableComponents(request, `Always allowed \`${request.toolName}\` by ${interaction.user.tag}`);
+        log(`User always-allowed tool: tool=${request.toolName}, requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}`);
         // Return SDK suggestions as updatedPermissions so SDK stops prompting
         request.resolve({
             behavior: 'allow',
@@ -532,6 +553,7 @@ async function handleApproveButton(interaction: ButtonInteraction): Promise<bool
 
     if (action === 'deny') {
         // Show modal for deny reason
+        log.debug(`Showing deny reason modal: requestId=${requestId}, tool=${request.toolName}`);
         const modal = new ModalBuilder()
             .setCustomId(`approve:${requestId}:deny:modal`)
             .setTitle('Deny reason');
@@ -562,6 +584,7 @@ async function handleModalSubmit(interaction: ModalSubmitInteraction): Promise<b
         const request = pendingRequests.get(requestId);
 
         if (!request || request.type !== 'ask_user') {
+            log.debug(`Modal submit for expired ask request: requestId=${requestId}`);
             await interaction.reply({ content: 'This question has expired.', ephemeral: true });
             return true;
         }
@@ -571,6 +594,7 @@ async function handleModalSubmit(interaction: ModalSubmitInteraction): Promise<b
 
         const answer = interaction.fields.getTextInputValue('answer');
         request.answers![q.question] = answer;
+        log.debug(`Question answered via modal: requestId=${requestId}, question="${q.question}"`);
         await interaction.deferUpdate();
         await sendQuestionUI(request);
         return true;
@@ -583,6 +607,7 @@ async function handleModalSubmit(interaction: ModalSubmitInteraction): Promise<b
         const request = pendingRequests.get(requestId);
 
         if (!request || request.type !== 'approval') {
+            log.debug(`Modal submit for expired approval request: requestId=${requestId}`);
             await interaction.reply({ content: 'This approval has expired.', ephemeral: true });
             return true;
         }
@@ -593,6 +618,7 @@ async function handleModalSubmit(interaction: ModalSubmitInteraction): Promise<b
         const reason = interaction.fields.getTextInputValue('reason') || 'User denied this action';
         await interaction.deferUpdate();
         await disableComponents(request, `Denied by ${interaction.user.tag}: ${reason}`);
+        log(`User denied tool: tool=${request.toolName}, requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}, reason="${reason}"`);
         request.resolve({ behavior: 'deny', message: reason });
         return true;
     }
@@ -606,6 +632,7 @@ async function handleModalSubmit(interaction: ModalSubmitInteraction): Promise<b
 
 async function disableComponents(request: PendingRequest, footerText: string): Promise<void> {
     if (!request.currentMsgId) return;
+    log.debug(`Disabling components: requestId=${request.requestId}, thread=${request.threadId}`);
     try {
         await editRichMessage(request.threadId, request.currentMsgId, {
             components: [],
@@ -615,11 +642,12 @@ async function disableComponents(request: PendingRequest, footerText: string): P
             }],
         });
     } catch (err) {
-        log(`Failed to disable components: ${err}`);
+        log.error(`Failed to disable components: requestId=${request.requestId}, thread=${request.threadId}, error=${err}`);
     }
 }
 
 async function expireRequest(request: PendingRequest): Promise<void> {
+    log.debug(`Expiring request UI: requestId=${request.requestId}, type=${request.type}, thread=${request.threadId}`);
     if (request.currentMsgId) {
         try {
             await editRichMessage(request.threadId, request.currentMsgId, {
@@ -630,7 +658,7 @@ async function expireRequest(request: PendingRequest): Promise<void> {
                 }],
             });
         } catch (err) {
-            log(`Failed to expire request UI: ${err}`);
+            log.error(`Failed to expire request UI: requestId=${request.requestId}, thread=${request.threadId}, error=${err}`);
         }
     }
 }
@@ -639,12 +667,17 @@ async function expireRequest(request: PendingRequest): Promise<void> {
  * Cleanup all pending requests for a thread (on interrupt/session end).
  */
 export function cleanupThread(threadId: string): void {
+    let cleaned = 0;
     for (const [requestId, request] of pendingRequests) {
         if (request.threadId === threadId) {
             clearTimeout(request.timeout);
             pendingRequests.delete(requestId);
             request.resolve({ behavior: 'deny', message: 'Session ended.' });
+            cleaned++;
         }
+    }
+    if (cleaned > 0) {
+        log(`Cleaned up ${cleaned} pending request(s) for thread ${threadId}`);
     }
 }
 

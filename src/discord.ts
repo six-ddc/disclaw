@@ -33,14 +33,18 @@ const suppressLinkPreviews = process.env.SHOW_LINK_PREVIEWS === '1'  ? false : t
 /** Initialize with the discord.js client instance. Must be called before any send functions. */
 export function initDiscord(c: Client) {
     client = c;
-    log('Client initialized');
+    log('Discord client initialized');
 }
 
 /** Get a text channel by ID. Throws if client not initialized or channel not sendable. */
 async function getChannel(channelId: string): Promise<TextChannel> {
-    if (!client) throw new Error('Discord client not initialized — call initDiscord() first');
+    if (!client) {
+        log.error(`Discord client not initialized when fetching channel ${channelId}`);
+        throw new Error('Discord client not initialized — call initDiscord() first');
+    }
     const channel = await client.channels.fetch(channelId);
     if (!channel?.isTextBased() || !('send' in channel)) {
+        log.error(`Channel ${channelId} is not a sendable text channel`);
         throw new Error(`Channel ${channelId} is not a sendable text channel`);
     }
     return channel as TextChannel;
@@ -140,7 +144,11 @@ export function flattenTables(text: string): string {
 export function splitMarkdown(text: string, maxLen = 2000): string[] {
     // Flatten tables before splitting since Discord doesn't render them
     text = flattenTables(text);
-    if (text.length <= maxLen) return [text];
+    if (text.length <= maxLen) {
+        log.debug(`Markdown fits in single chunk (${text.length} chars), no split needed`);
+        return [text];
+    }
+    log.debug(`Splitting markdown into multiple chunks (${text.length} chars, maxLen=${maxLen})`);
 
     // ---- Step 1: Parse into segments ----
 
@@ -280,6 +288,7 @@ export function splitMarkdown(text: string, maxLen = 2000): string[] {
     }
     flush();
 
+    log.debug(`Markdown split complete: ${chunks.length} chunks from ${text.length} chars`);
     return chunks;
 }
 
@@ -297,13 +306,18 @@ export interface EmbedData {
  * Splits long messages using markdown-aware chunking to preserve code blocks.
  */
 export async function sendToThread(threadId: string, content: string): Promise<void> {
-    if (!content.trim()) return; // Skip empty messages (Discord rejects them)
+    if (!content.trim()) {
+        log.debug(`Skipping empty message for thread ${threadId}`);
+        return;
+    }
     const channel = await getChannel(threadId);
     const chunks = splitMarkdown(content, 2000);
+    log.debug(`Sending message to thread ${threadId} (${content.length} chars, ${chunks.length} chunks)`);
     for (const chunk of chunks) {
         if (!chunk.trim()) continue;
         await channel.send(suppressLinkPreviews ? wrapUrls(chunk) : chunk);
     }
+    log(`Message sent to thread ${threadId} (${content.length} chars, ${chunks.length} chunks)`);
 }
 
 /**
@@ -312,6 +326,7 @@ export async function sendToThread(threadId: string, content: string): Promise<v
 export async function sendEmbed(threadId: string, embeds: EmbedData[]): Promise<string> {
     const channel = await getChannel(threadId);
     const msg = await channel.send({ embeds });
+    log(`Embed sent to thread ${threadId} (messageId=${msg.id}, ${embeds.length} embeds)`);
     return msg.id;
 }
 
@@ -322,6 +337,7 @@ export async function editEmbed(channelId: string, messageId: string, embeds: Em
     const channel = await getChannel(channelId);
     const msg = await channel.messages.fetch(messageId);
     await msg.edit({ embeds });
+    log.debug(`Embed edited (channelId=${channelId}, messageId=${messageId}, ${embeds.length} embeds)`);
 }
 
 /**
@@ -331,16 +347,23 @@ export async function editMessage(channelId: string, messageId: string, content:
     const channel = await getChannel(channelId);
     const message = await channel.messages.fetch(messageId);
     await message.edit(content);
+    log.debug(`Message edited (channelId=${channelId}, messageId=${messageId}, ${content.length} chars)`);
 }
 
 /**
  * Rename a thread
  */
 export async function renameThread(threadId: string, name: string): Promise<void> {
-    if (!client) throw new Error('Discord client not initialized — call initDiscord() first');
+    if (!client) {
+        log.error(`Discord client not initialized when renaming thread ${threadId}`);
+        throw new Error('Discord client not initialized — call initDiscord() first');
+    }
     const channel = await client.channels.fetch(threadId);
     if (channel?.isThread()) {
         await channel.setName(name);
+        log(`Thread renamed (threadId=${threadId}, name=${name})`);
+    } else {
+        log.warn(`Cannot rename: channel ${threadId} is not a thread`);
     }
 }
 
@@ -350,6 +373,7 @@ export async function renameThread(threadId: string, name: string): Promise<void
 export async function sendRichMessage(channelId: string, payload: Parameters<TextChannel['send']>[0]): Promise<string> {
     const channel = await getChannel(channelId);
     const msg = await channel.send(payload);
+    log(`Rich message sent (channelId=${channelId}, messageId=${msg.id})`);
     return msg.id;
 }
 
@@ -360,6 +384,7 @@ export async function editRichMessage(channelId: string, messageId: string, payl
     const channel = await getChannel(channelId);
     const msg = await channel.messages.fetch(messageId);
     await msg.edit(payload);
+    log.debug(`Rich message edited (channelId=${channelId}, messageId=${messageId})`);
 }
 
 /**
@@ -369,14 +394,19 @@ export async function addReaction(channelId: string, messageId: string, emoji: s
     const channel = await getChannel(channelId);
     const msg = await channel.messages.fetch(messageId);
     await msg.react(emoji);
+    log.debug(`Reaction added (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
 }
 
 /**
  * Remove the bot's own reaction from a message
  */
 export async function removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
-    if (!client?.user) return;
+    if (!client?.user) {
+        log.warn(`Cannot remove reaction: client or user not available (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
+        return;
+    }
     const channel = await getChannel(channelId);
     const msg = await channel.messages.fetch(messageId);
     await msg.reactions.resolve(emoji)?.users.remove(client.user.id);
+    log.debug(`Reaction removed (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
 }

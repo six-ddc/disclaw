@@ -30,7 +30,7 @@ const rootLogger = pino({
             options: {
                 destination: 1, // stdout
                 colorize: true,
-                translateTime: 'HH:MM:ss.l',
+                translateTime: 'SYS:HH:MM:ss.l',
                 ignore: 'pid,hostname,module',
                 messageFormat: '[{module}] {msg}',
             },
@@ -42,7 +42,7 @@ const rootLogger = pino({
                 destination: getLogFile(),
                 mkdir: true,
                 colorize: false,
-                translateTime: 'HH:MM:ss.l',
+                translateTime: 'SYS:HH:MM:ss.l',
                 ignore: 'pid,hostname,module',
                 messageFormat: '[{module}] {msg}',
             },

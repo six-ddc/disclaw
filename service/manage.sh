@@ -46,8 +46,18 @@ cmd_install() {
             echo "Installed plist to ${PLIST_DEST}"
             ;;
         Linux)
+            # Build minimal PATH for service: standard dirs + bun dir + claude dir
+            BUN_DIR="$(dirname "$BUN_PATH")"
+            CLAUDE_PATH="$(command -v claude 2>/dev/null || true)"
+            CLAUDE_DIR="${CLAUDE_PATH:+$(dirname "$CLAUDE_PATH")}"
+            SVC_PATH="/usr/local/bin:/usr/bin:/bin"
+            for d in "$BUN_DIR" "$CLAUDE_DIR"; do
+                [[ -n "$d" && ":${SVC_PATH}:" != *":${d}:"* ]] && SVC_PATH="${d}:${SVC_PATH}"
+            done
             sed -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
                 -e "s|__BUN_PATH__|${BUN_PATH}|g" \
+                -e "s|__PATH__|${SVC_PATH}|g" \
+                -e "s|__HOME__|${HOME}|g" \
                 "$UNIT_TMPL" | sudo tee "$UNIT_DEST" > /dev/null
             sudo systemctl daemon-reload
             sudo systemctl enable "$SERVICE"

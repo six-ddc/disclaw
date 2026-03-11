@@ -20,7 +20,9 @@ import { mkdirSync } from 'fs';
 import { dirname, resolve } from 'path';
 try {
     mkdirSync(dirname(DB_PATH), { recursive: true });
-} catch {}
+} catch (err) {
+    log.warn(`Failed to create data directory for ${DB_PATH}: ${err}`);
+}
 
 // Open database
 export const db = new Database(DB_PATH);
@@ -117,7 +119,7 @@ db.run(`
 `);
 db.run(`CREATE INDEX IF NOT EXISTS idx_pager_thread ON pager_messages(thread_id)`);
 
-console.log(`[db] SQLite database ready at ${DB_PATH}`);
+log(`Database initialized at ${DB_PATH}`);
 
 // In-memory cache for channel configs (TTL: 5 minutes)
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -134,12 +136,14 @@ export function getChannelConfigCached(channelId: string): { working_dir: string
     const now = Date.now();
 
     if (cached && cached.expiresAt > now) {
+        log.debug(`Channel config cache hit: channel=${channelId}`);
         return cached.data;
     }
 
     // Cache miss or expired - fetch from DB
     const data = getChannelConfig(channelId);
     channelConfigCache.set(channelId, { data, expiresAt: now + CACHE_TTL_MS });
+    log.debug(`Channel config cache miss: channel=${channelId}, workingDir=${data?.working_dir || '(none)'}`);
     return data;
 }
 
@@ -154,28 +158,36 @@ export interface ThreadMapping {
 }
 
 export function getThreadMapping(threadId: string): ThreadMapping | null {
-    return db.query('SELECT session_id, working_dir, model, fork_from, permission_mode, display_mode FROM threads WHERE thread_id = ?')
+    const mapping = db.query('SELECT session_id, working_dir, model, fork_from, permission_mode, display_mode FROM threads WHERE thread_id = ?')
         .get(threadId) as ThreadMapping | null;
+    log.debug(`getThreadMapping: thread=${threadId}, found=${!!mapping}${mapping ? `, session=${mapping.session_id || '(empty)'}` : ''}`);
+    return mapping;
 }
 
 export function updateThreadSession(threadId: string, sessionId: string | null): void {
     db.run('UPDATE threads SET session_id = ? WHERE thread_id = ?', [sessionId ?? '', threadId]);
+    log(`Thread session updated: thread=${threadId}, session=${sessionId || '(cleared)'}`);
 }
 
 export function updateThreadModel(threadId: string, model: string): void {
     db.run('UPDATE threads SET model = ? WHERE thread_id = ?', [model, threadId]);
+    log.debug(`Thread model updated: thread=${threadId}, model=${model}`);
 }
 
 export function updateThreadPermissionMode(threadId: string, mode: string | null): void {
     db.run('UPDATE threads SET permission_mode = ? WHERE thread_id = ?', [mode, threadId]);
+    log.debug(`Thread permission mode updated: thread=${threadId}, mode=${mode || '(default)'}`);
 }
 
 export function updateThreadDisplayMode(threadId: string, mode: string | null): void {
     db.run('UPDATE threads SET display_mode = ? WHERE thread_id = ?', [mode, threadId]);
+    log.debug(`Thread display mode updated: thread=${threadId}, mode=${mode || '(default)'}`);
 }
 
 export function updateThreadWorkingDir(threadId: string, workingDir: string): void {
-    db.run('UPDATE threads SET working_dir = ? WHERE thread_id = ?', [resolve(workingDir), threadId]);
+    const absDir = resolve(workingDir);
+    db.run('UPDATE threads SET working_dir = ? WHERE thread_id = ?', [absDir, threadId]);
+    log(`Thread working dir updated: thread=${threadId}, dir=${absDir}`);
 }
 
 function clearForkFrom(threadId: string): void {
@@ -190,6 +202,7 @@ export function getThreadTitle(threadId: string): string | null {
 
 export function setThreadTitle(threadId: string, title: string): void {
     db.run('UPDATE threads SET title = ? WHERE thread_id = ?', [title, threadId]);
+    log.debug(`Thread title set: thread=${threadId}, title=${title}`);
 }
 
 /**
@@ -235,6 +248,7 @@ export function setChannelConfig(channelId: string, workingDir: string): void {
 
     // Invalidate cache
     channelConfigCache.delete(channelId);
+    log(`Channel config updated: channel=${channelId}, workingDir=${absDir}`);
 }
 
 // =========================================================================
@@ -265,6 +279,7 @@ export function createCronJob(jobId: string, threadId: string, creatorId: string
         'INSERT INTO cron_jobs (job_id, thread_id, creator_id, schedule, prompt, name) VALUES (?, ?, ?, ?, ?, ?)',
         [jobId, threadId, creatorId, schedule, prompt, name || null]
     );
+    log(`Cron job created: jobId=${jobId}, thread=${threadId}, schedule=${schedule}, name=${name || '(unnamed)'}`);
 }
 
 export function updateCronJob(jobId: string, fields: { name?: string; schedule?: string; prompt?: string }): void {
@@ -276,6 +291,7 @@ export function updateCronJob(jobId: string, fields: { name?: string; schedule?:
     if (sets.length === 0) return;
     values.push(jobId);
     db.run(`UPDATE cron_jobs SET ${sets.join(', ')} WHERE job_id = ?`, values);
+    log.debug(`Cron job updated: jobId=${jobId}, fields=${Object.keys(fields).join(',')}`);
 }
 
 export function getCronJob(jobId: string): CronJob | null {
@@ -295,14 +311,18 @@ export function listCronJobs(): CronJob[] {
 
 export function setCronJobEnabled(jobId: string, enabled: boolean): void {
     db.run('UPDATE cron_jobs SET enabled = ? WHERE job_id = ?', [enabled ? 1 : 0, jobId]);
+    log(`Cron job ${enabled ? 'enabled' : 'disabled'}: jobId=${jobId}`);
 }
 
 export function setCronJobLastRun(jobId: string): void {
-    db.run('UPDATE cron_jobs SET last_run_at = ? WHERE job_id = ?', [new Date().toISOString(), jobId]);
+    const timestamp = new Date().toISOString();
+    db.run('UPDATE cron_jobs SET last_run_at = ? WHERE job_id = ?', [timestamp, jobId]);
+    log.debug(`Cron job last run updated: jobId=${jobId}, at=${timestamp}`);
 }
 
 export function deleteCronJob(jobId: string): void {
     db.run('DELETE FROM cron_jobs WHERE job_id = ?', [jobId]);
+    log(`Cron job deleted: jobId=${jobId}`);
 }
 
 // =========================================================================
@@ -331,6 +351,7 @@ export function savePagerMessage(messageId: string, threadId: string, sessionId:
         )`,
         [threadId]
     );
+    log.debug(`Pager message saved: messageId=${messageId}, thread=${threadId}, session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}`);
 }
 
 export function getPagerMessage(messageId: string): PagerMessage | null {

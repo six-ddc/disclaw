@@ -339,17 +339,22 @@ async function renderPersistentPage(
             ...(msgOffset > 0 ? { offset: msgOffset } : {}),
             ...(msgLimit > 0 ? { limit: msgLimit } : {}),
         });
+        log.debug(`renderPersistentPage: fetched ${rawMessages.length} raw messages for session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}`);
         const pages = parseSessionPages(rawMessages as Array<{ type: string; message: unknown }>);
-        if (pages.length === 0) return null;
+        if (pages.length === 0) {
+            log.debug(`renderPersistentPage: no displayable pages from ${rawMessages.length} messages`);
+            return null;
+        }
 
         const clampedIdx = Math.max(0, Math.min(pageIdx, pages.length - 1));
+        log.debug(`renderPersistentPage: ${pages.length} pages, showing page ${clampedIdx + 1}`);
         return {
             embed: buildPageEmbed(pages[clampedIdx]!, clampedIdx, pages.length),
             total: pages.length,
             pageIdx: clampedIdx,
         };
     } catch (e) {
-        log(`Failed to fetch session messages: ${e}`);
+        log.error(`Failed to fetch session messages for persistent page: session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}: ${e}`);
         return null;
     }
 }
@@ -677,13 +682,14 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
         } else if (action === 'next' && state.currentPage < state.pages.length - 1) {
             state.currentPage++;
         }
+        log.debug(`Phase 1 navigation: pagerId=${pagerId}, action=${action}, page=${state.currentPage + 1}/${state.pages.length}`);
 
         try {
             const embed = buildLiveEmbed(state);
             const row = buildLiveButtons(state.id, state.currentPage, state.pages.length);
             await interaction.update({ embeds: [embed], components: [row] });
         } catch (e) {
-            log(`Failed to handle live pager interaction: ${e}`);
+            log.error(`Failed to handle live pager interaction: pagerId=${pagerId}, action=${action}: ${e}`);
         }
         return true;
     }

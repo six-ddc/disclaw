@@ -16,7 +16,9 @@ import {
 } from 'discord.js';
 import { readdirSync, statSync } from 'fs';
 import { resolve, dirname, basename } from 'path';
+import { createLogger } from './logger.js';
 
+const log = createLogger('dir-picker');
 const DIRS_PER_PAGE = 10; // 2 rows of 5
 const TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 
@@ -34,7 +36,7 @@ const pendingPicks = new Map<string, PendingPick>();
 /** List subdirectories of a path, sorted alphabetically. */
 function listDirs(dir: string): string[] {
     try {
-        return readdirSync(dir)
+        const dirs = readdirSync(dir)
             .filter(name => {
                 if (name.startsWith('.')) return false;
                 try {
@@ -44,13 +46,17 @@ function listDirs(dir: string): string[] {
                 }
             })
             .sort();
-    } catch {
+        log.debug(`Listed ${dirs.length} subdirectories in ${dir}`);
+        return dirs;
+    } catch (err) {
+        log.warn(`Failed to list directories in ${dir}: ${err}`);
         return [];
     }
 }
 
 /** Build the message content and button components for the current state. */
 function buildPickerMessage(pick: PendingPick) {
+    log.debug(`Building picker message: pickId=${pick.pickId}, dir=${pick.currentDir}, page=${pick.page}`);
     const dirs = listDirs(pick.currentDir);
     const totalPages = Math.max(1, Math.ceil(dirs.length / DIRS_PER_PAGE));
     const page = Math.min(pick.page, totalPages - 1);
@@ -130,8 +136,11 @@ export function startDirPicker(interaction: { editReply: (opts: string | Message
     const pickId = crypto.randomUUID().slice(0, 8);
     const currentDir = resolve(startDir || process.cwd());
 
+    log(`Picker opened: pickId=${pickId}, startDir=${currentDir}`);
+
     return new Promise<string | null>(async (resolvePromise) => {
         const timeout = setTimeout(() => {
+            log.warn(`Picker timed out: pickId=${pickId}, lastDir=${pendingPicks.get(pickId)?.currentDir}`);
             pendingPicks.delete(pickId);
             interaction.editReply({ content: 'Directory selection timed out.', components: [] }).catch(() => {});
             resolvePromise(null);
@@ -140,8 +149,15 @@ export function startDirPicker(interaction: { editReply: (opts: string | Message
         const pick: PendingPick = { pickId, currentDir, page: 0, resolve: resolvePromise, timeout };
         pendingPicks.set(pickId, pick);
 
-        const msg = buildPickerMessage(pick);
-        pick.message = await interaction.editReply(msg);
+        try {
+            const msg = buildPickerMessage(pick);
+            pick.message = await interaction.editReply(msg);
+        } catch (err) {
+            log.error(`Failed to send initial picker message: pickId=${pickId}, error=${err}`);
+            clearTimeout(timeout);
+            pendingPicks.delete(pickId);
+            resolvePromise(null);
+        }
     });
 }
 
@@ -159,6 +175,7 @@ export async function handleDirPickInteraction(interaction: ButtonInteraction): 
 
     const pick = pendingPicks.get(pickId);
     if (!pick) {
+        log.warn(`Picker interaction for expired picker: pickId=${pickId}, action=${action}`);
         await interaction.update({ content: 'This picker has expired.', components: [] });
         return true;
     }
@@ -169,23 +186,30 @@ export async function handleDirPickInteraction(interaction: ButtonInteraction): 
         const idx = parseInt(parts[3]!, 10);
         const target = dirs[idx];
         if (target) {
+            const prevDir = pick.currentDir;
             pick.currentDir = resolve(pick.currentDir, target);
             pick.page = 0;
+            log(`Directory navigated: pickId=${pickId}, ${prevDir} → ${pick.currentDir}`);
         }
         await interaction.update(buildPickerMessage(pick));
     } else if (action === 'up') {
+        const prevDir = pick.currentDir;
         pick.currentDir = dirname(pick.currentDir);
         pick.page = 0;
+        log(`Directory navigated up: pickId=${pickId}, ${prevDir} → ${pick.currentDir}`);
         await interaction.update(buildPickerMessage(pick));
     } else if (action === 'prev') {
         pick.page = Math.max(0, pick.page - 1);
+        log.debug(`Picker page prev: pickId=${pickId}, page=${pick.page}`);
         await interaction.update(buildPickerMessage(pick));
     } else if (action === 'next') {
         pick.page++;
+        log.debug(`Picker page next: pickId=${pickId}, page=${pick.page}`);
         await interaction.update(buildPickerMessage(pick));
     } else if (action === 'select') {
         clearTimeout(pick.timeout);
         pendingPicks.delete(pickId);
+        log(`Directory selected: pickId=${pickId}, dir=${pick.currentDir}`);
         await interaction.update({
             content: `Selected: \`${pick.currentDir}\``,
             components: [],
@@ -194,6 +218,7 @@ export async function handleDirPickInteraction(interaction: ButtonInteraction): 
     } else if (action === 'cancel') {
         clearTimeout(pick.timeout);
         pendingPicks.delete(pickId);
+        log(`Picker cancelled: pickId=${pickId}, lastDir=${pick.currentDir}`);
         await interaction.update({ content: 'Cancelled.', components: [] });
         pick.resolve(null);
     }

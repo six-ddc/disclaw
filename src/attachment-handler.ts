@@ -51,18 +51,32 @@ type AttachmentKind = 'image' | 'pdf' | 'text' | 'unsupported';
 function classifyAttachment(attachment: Attachment): AttachmentKind {
     const contentType = attachment.contentType?.toLowerCase() || '';
 
-    if (SUPPORTED_IMAGE_TYPES.has(contentType)) return 'image';
-    if (contentType === 'application/pdf') return 'pdf';
-    if (contentType.startsWith('text/')) return 'text';
+    if (SUPPORTED_IMAGE_TYPES.has(contentType)) {
+        log.debug(`Classified "${attachment.name}" as image (contentType=${contentType})`);
+        return 'image';
+    }
+    if (contentType === 'application/pdf') {
+        log.debug(`Classified "${attachment.name}" as pdf (contentType=${contentType})`);
+        return 'pdf';
+    }
+    if (contentType.startsWith('text/')) {
+        log.debug(`Classified "${attachment.name}" as text (contentType=${contentType})`);
+        return 'text';
+    }
 
     // Fall back to extension check
     const ext = attachment.name?.split('.').pop()?.toLowerCase() || '';
-    if (TEXT_EXTENSIONS.has(ext)) return 'text';
+    if (TEXT_EXTENSIONS.has(ext)) {
+        log.debug(`Classified "${attachment.name}" as text via extension (ext=${ext})`);
+        return 'text';
+    }
 
+    log.warn(`Unsupported attachment "${attachment.name}" (contentType=${contentType}, ext=${ext})`);
     return 'unsupported';
 }
 
 async function downloadAttachment(url: string, maxBytes: number): Promise<Buffer> {
+    log.debug(`Downloading attachment (maxBytes=${maxBytes})`);
     const response = await fetch(url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -76,6 +90,7 @@ async function downloadAttachment(url: string, maxBytes: number): Promise<Buffer
         throw new Error(`File too large (${Math.round(buffer.length / 1024 / 1024)}MB, max ${Math.round(maxBytes / 1024 / 1024)}MB)`);
     }
 
+    log.debug(`Downloaded ${buffer.length} bytes`);
     return buffer;
 }
 
@@ -120,6 +135,7 @@ async function processAttachments(attachments: Attachment[]): Promise<ContentBlo
             switch (kind) {
                 case 'image': {
                     if (imageCount >= MAX_IMAGES_PER_MESSAGE) {
+                        log.warn(`Skipped image "${attachment.name}": max ${MAX_IMAGES_PER_MESSAGE} images per message (already have ${imageCount})`);
                         blocks.push({ type: 'text', text: `[Skipped image "${attachment.name}": max ${MAX_IMAGES_PER_MESSAGE} images per message]` });
                         break;
                     }
@@ -142,26 +158,32 @@ async function processAttachments(attachments: Attachment[]): Promise<ContentBlo
                     break;
                 }
                 case 'unsupported':
+                    log.warn(`Skipped unsupported attachment "${attachment.name}" (contentType=${attachment.contentType || 'unknown'}, size=${attachment.size})`);
                     blocks.push({ type: 'text', text: `[Unsupported attachment: "${attachment.name}" (${attachment.contentType || 'unknown type'})]` });
                     break;
             }
         } catch (err) {
             const errMsg = err instanceof Error ? err.message : String(err);
-            log(`Failed to process attachment "${attachment.name}": ${errMsg}`);
+            log.error(`Failed to process attachment "${attachment.name}" (contentType=${attachment.contentType || 'unknown'}, size=${attachment.size}): ${errMsg}`);
             blocks.push({ type: 'text', text: `[Failed to process attachment "${attachment.name}": ${errMsg}]` });
         }
     }
 
+    log(`Processed ${attachments.length} attachments → ${blocks.length} content blocks (${imageCount} images)`);
     return blocks;
 }
 
 async function fetchReplyContext(message: Message): Promise<ContentBlock[]> {
     if (!message.reference?.messageId) return [];
 
+    log.debug(`Fetching reply context for messageId=${message.reference.messageId}`);
     try {
         const channel = message.channel;
         const referenced = await channel.messages.fetch(message.reference.messageId);
-        if (!referenced) return [];
+        if (!referenced) {
+            log.warn(`Referenced message ${message.reference.messageId} not found`);
+            return [];
+        }
 
         const blocks: ContentBlock[] = [];
 
@@ -187,14 +209,15 @@ async function fetchReplyContext(message: Message): Promise<ContentBlock[]> {
                 log(`Reply image attached: ${attachment.name}`);
             } catch (err) {
                 const errMsg = err instanceof Error ? err.message : String(err);
-                log(`Failed to fetch reply image: ${errMsg}`);
+                log.error(`Failed to fetch reply image "${attachment.name}": ${errMsg}`);
             }
         }
 
+        log(`Reply context resolved: ${blocks.length} blocks from @${referenced.author.tag} (${imageAttachments.length} images)`);
         return blocks;
     } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        log(`Failed to fetch referenced message: ${errMsg}`);
+        log.error(`Failed to fetch referenced message ${message.reference.messageId}: ${errMsg}`);
         return [];
     }
 }
@@ -219,8 +242,11 @@ export async function extractMessageContent(message: Message, overrideText?: str
 
     // Fast path: pure text, no rich content
     if (!hasAttachments && !hasReply) {
+        log.debug(`Pure text message (${text.length} chars)`);
         return { type: 'text', text };
     }
+
+    log(`Extracting multimodal content: ${attachments.length} attachments, hasReply=${hasReply}`);
 
     const blocks: ContentBlock[] = [];
 
@@ -255,5 +281,6 @@ export async function extractMessageContent(message: Message, overrideText?: str
         .join(' ')
         .slice(0, 200);
 
+    log(`Multimodal prompt ready: ${blocks.length} blocks (${blocks.filter(b => b.type === 'image').length} images, ${blocks.filter(b => b.type === 'document').length} documents, ${blocks.filter(b => b.type === 'text').length} text)`);
     return { type: 'multimodal', blocks, textSummary };
 }

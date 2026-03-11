@@ -149,15 +149,19 @@ function getFileTypeInfo(filePath: string): { icon: string; language: string } {
 export function createClaudeSender(threadId: string) {
     // Map toolUseId → { discordMessageId, embeds } for correlating tool_result with tool_use
     const toolUseMessages = new Map<string, { messageId: string; embeds: EmbedData[] }>();
+    log.debug(`Created Claude sender for thread=${threadId}`);
 
     return async function sendClaudeMessages(messages: ClaudeMessage[]): Promise<void> {
+        log.debug(`Processing ${messages.length} message(s) for thread=${threadId}`);
         for (const msg of messages) {
             try {
             switch (msg.type) {
                 case 'text': {
                     // Send as plain text to preserve full markdown rendering
                     // (embeds have limited markdown support, breaking code blocks etc.)
+                    log.debug(`Sending text message to thread=${threadId} contentLength=${msg.content.length}`);
                     await sendToThread(threadId, msg.content);
+                    log(`Sent text message to thread=${threadId} contentLength=${msg.content.length}`);
                     break;
                 }
 
@@ -166,6 +170,7 @@ export function createClaudeSender(threadId: string) {
                     const toolInput = meta<Record<string, unknown>>(msg.metadata, 'input', {});
                     const toolUseId = meta<string | undefined>(msg.metadata, 'toolUseId', undefined);
                     const displayName = formatToolName(toolName);
+                    log.debug(`Processing tool_use thread=${threadId} tool=${displayName} toolUseId=${toolUseId}`);
 
                     let embeds: EmbedData[];
 
@@ -261,10 +266,12 @@ export function createClaudeSender(threadId: string) {
                     }
 
                     const discordMsgId = await sendEmbed(threadId, embeds);
+                    log(`Sent tool_use embed thread=${threadId} tool=${displayName} toolUseId=${toolUseId} discordMsgId=${discordMsgId}`);
 
                     // Track this tool_use message for later correlation with tool_result
                     if (toolUseId) {
                         toolUseMessages.set(toolUseId, { messageId: discordMsgId, embeds });
+                        log.debug(`Tracking tool_use for result correlation thread=${threadId} toolUseId=${toolUseId} trackedCount=${toolUseMessages.size}`);
                     }
                     break;
                 }
@@ -277,6 +284,7 @@ export function createClaudeSender(threadId: string) {
 
                     const toolUseId = meta<string | undefined>(msg.metadata, 'toolUseId', undefined);
                     const tracked = toolUseId ? toolUseMessages.get(toolUseId) : undefined;
+                    log.debug(`Processing tool_result thread=${threadId} toolUseId=${toolUseId} hasTracked=${!!tracked} contentLength=${cleanContent.length}`);
 
                     if (tracked) {
                         // Merge result into the original tool_use embed as a field
@@ -286,6 +294,7 @@ export function createClaudeSender(threadId: string) {
                         if (cleanContent) {
                             const { preview, isTruncated, totalLines } = truncateContent(cleanContent);
                             const suffix = isTruncated ? ` (+${totalLines - 15} more lines)` : '';
+                            log.debug(`Merging tool_result into tool_use embed thread=${threadId} toolUseId=${toolUseId} isTruncated=${isTruncated} totalLines=${totalLines}`);
                             const fields = embed.fields ?? [];
                             fields.push({
                                 name: `✅ Result${suffix}`,
@@ -293,26 +302,31 @@ export function createClaudeSender(threadId: string) {
                                 inline: false,
                             });
                             await editEmbed(threadId, tracked.messageId, [{ ...embed, fields, color: 0x00ffff }]);
+                            log(`Updated tool_use embed with result thread=${threadId} toolUseId=${toolUseId} messageId=${tracked.messageId}`);
                         } else {
                             // Empty result - append a Done field
                             const fields = embed.fields ?? [];
                             fields.push({ name: '✅ Done', value: '\u200b', inline: false });
                             await editEmbed(threadId, tracked.messageId, [{ ...embed, fields, color: 0x00ff00 }]);
+                            log(`Updated tool_use embed with empty result (Done) thread=${threadId} toolUseId=${toolUseId} messageId=${tracked.messageId}`);
                         }
                     } else if (cleanContent) {
                         // Fallback: no matching tool_use found, send as separate message
+                        log.warn(`No matching tool_use found for tool_result, sending as separate embed thread=${threadId} toolUseId=${toolUseId} contentLength=${cleanContent.length}`);
                         const { preview, isTruncated, totalLines } = truncateContent(cleanContent);
                         await sendEmbed(threadId, [{
                             color: 0x00ffff,
                             title: `✅ Tool Result${isTruncated ? ` (+${totalLines - 15} more lines)` : ''}`,
                             description: `\`\`\`\n${preview}\n\`\`\``,
                         }]);
+                        log(`Sent standalone tool_result embed thread=${threadId}`);
                     }
                     break;
                 }
 
                 case 'thinking': {
                     const chunks = splitText(msg.content, 4000);
+                    log.debug(`Sending thinking embed thread=${threadId} contentLength=${msg.content.length} chunks=${chunks.length}`);
                     for (let i = 0; i < chunks.length; i++) {
                         await sendEmbed(threadId, [{
                             color: 0x9b59b6,
@@ -320,11 +334,13 @@ export function createClaudeSender(threadId: string) {
                             description: chunks[i]!,
                         }]);
                     }
+                    log(`Sent thinking embed thread=${threadId} chunks=${chunks.length}`);
                     break;
                 }
 
                 case 'system': {
                     const subtype = meta<string>(msg.metadata, 'subtype', '');
+                    log.debug(`Processing system message thread=${threadId} subtype=${subtype}`);
 
                     if (subtype === 'new_session') {
                         const label = meta<string>(msg.metadata, 'label', 'New session');
@@ -337,6 +353,7 @@ export function createClaudeSender(threadId: string) {
                             color: 0x57f287,
                             description: `**${label}** · ${parts.join(' · ')}`,
                         }]);
+                        log(`Sent new_session embed thread=${threadId} label=${label} model=${model} cwd=${cwd}`);
                         break;
                     }
 
@@ -375,6 +392,7 @@ export function createClaudeSender(threadId: string) {
                         await sendEmbed(threadId, [{
                             description: `**Done** · ${parts.join(' · ')}`,
                         }]);
+                        log(`Sent completion stats thread=${threadId} model=${modelName} durationMs=${durationMs} stopReason=${stopReasonDisplay}`);
                     }
                     // } else if (msg.metadata?.cwd) {
                     //     // Init message: just show working directory
@@ -388,6 +406,7 @@ export function createClaudeSender(threadId: string) {
                 }
 
                 case 'other': {
+                    log.debug(`Processing other message type thread=${threadId} contentLength=${msg.content.length}`);
                     const jsonStr = JSON.stringify(msg.metadata || msg.content, null, 2);
                     const maxChunkLength = 4096 - '```json\n\n```'.length - 50;
                     const chunks = splitText(jsonStr, maxChunkLength);
@@ -398,6 +417,7 @@ export function createClaudeSender(threadId: string) {
                             description: `\`\`\`json\n${chunks[i]}\n\`\`\``,
                         }]);
                     }
+                    log(`Sent other content embed thread=${threadId} chunks=${chunks.length}`);
                     break;
                 }
 
@@ -406,6 +426,7 @@ export function createClaudeSender(threadId: string) {
                     const toolInput = meta<Record<string, unknown>>(msg.metadata, 'toolInput', {});
                     const inputPreview = JSON.stringify(toolInput, null, 2);
                     const { preview } = truncateContent(inputPreview, 6, 500);
+                    log.warn(`Permission denied for tool thread=${threadId} tool=${toolName}`);
 
                     await sendEmbed(threadId, [{
                         color: 0xff4444,
@@ -417,12 +438,14 @@ export function createClaudeSender(threadId: string) {
                         ],
                         footer: { text: 'Change operation mode with /settings → Mode Settings to allow more tools' },
                     }]);
+                    log(`Sent permission_denied embed thread=${threadId} tool=${toolName}`);
                     break;
                 }
 
                 case 'task_started': {
                     const description = meta(msg.metadata, 'description', '') || msg.content || 'Starting subagent task...';
                     const taskType = meta<string | undefined>(msg.metadata, 'taskType', undefined);
+                    log.debug(`Processing task_started thread=${threadId} taskType=${taskType}`);
 
                     await sendEmbed(threadId, [{
                         color: 0x5865f2,
@@ -430,6 +453,7 @@ export function createClaudeSender(threadId: string) {
                         description,
                         fields: taskType ? [{ name: 'Type', value: taskType, inline: true }] : [],
                     }]);
+                    log(`Sent task_started embed thread=${threadId} taskType=${taskType}`);
                     break;
                 }
 
@@ -444,6 +468,7 @@ export function createClaudeSender(threadId: string) {
                         title: `${statusEmoji} Subagent Task ${status.charAt(0).toUpperCase() + status.slice(1)}`,
                         description: truncateCodePoints(summary, 4000),
                     }]);
+                    log(`Sent task_notification embed thread=${threadId} status=${status}`);
                     break;
                 }
 
@@ -452,6 +477,7 @@ export function createClaudeSender(threadId: string) {
                     const elapsed = meta(msg.metadata, 'elapsedSeconds', 0);
                     if (elapsed >= 5) {
                         const toolName = meta(msg.metadata, 'toolName', 'Unknown');
+                        log.debug(`Sending tool_progress embed thread=${threadId} tool=${toolName} elapsed=${elapsed.toFixed(1)}s`);
                         await sendEmbed(threadId, [{
                             color: 0x888888,
                             title: `⏳ \`${formatToolName(toolName)}\` running...`,
@@ -463,18 +489,20 @@ export function createClaudeSender(threadId: string) {
 
                 case 'tool_summary': {
                     if (msg.content) {
+                        log.debug(`Sending tool_summary embed thread=${threadId} contentLength=${msg.content.length}`);
                         await sendEmbed(threadId, [{
                             color: 0x00ccff,
                             title: '📋 Tool Summary',
                             description: truncateCodePoints(msg.content, 4000),
                         }]);
+                        log(`Sent tool_summary embed thread=${threadId} contentLength=${msg.content.length}`);
                     }
                     break;
                 }
             }
             } catch (err) {
                 const preview = msg.content?.slice(0, 80) || JSON.stringify(msg.metadata)?.slice(0, 80) || '';
-                log(`Failed to send ${msg.type} to ${threadId}: ${err} | preview: ${preview}`);
+                log.error(`Failed to send ${msg.type} to thread=${threadId}: ${err} | preview: ${preview}`);
             }
         }
     };

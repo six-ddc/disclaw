@@ -55,6 +55,7 @@ export class CronScheduler {
     /** Load all enabled jobs from DB and register them, catching up missed runs */
     loadAll(): void {
         const jobs = listCronJobs();
+        log.debug(`Found ${jobs.length} total cron jobs in DB`);
         let count = 0;
         const missed: string[] = [];
         for (const job of jobs) {
@@ -72,8 +73,12 @@ export class CronScheduler {
                         if (expectedNext && expectedNext < new Date()) {
                             missed.push(job.job_id);
                         }
-                    } catch {}
+                    } catch (err) {
+                        log.warn(`Failed to check missed run for job ${job.job_id}: ${err}`);
+                    }
                 }
+            } else {
+                log.debug(`Skipping disabled job ${job.job_id}`);
             }
         }
         log(`Loaded ${count} cron jobs`);
@@ -109,15 +114,19 @@ export class CronScheduler {
         if (existing) {
             existing.stop();
             this.jobs.delete(jobId);
+            log.debug(`Unregistered croner instance for job ${jobId}`);
         }
     }
 
     /** Execute a scheduled job */
     private async execute(jobId: string): Promise<void> {
         const job = getCronJob(jobId);
-        if (!job || !job.enabled) return;
+        if (!job || !job.enabled) {
+            log.debug(`Skipping execution for job ${jobId}: ${!job ? 'not found' : 'disabled'}`);
+            return;
+        }
 
-        log(`Executing job ${jobId}: ${job.prompt.slice(0, 50)}`);
+        log(`Executing job ${jobId} (thread=${job.thread_id}): ${job.prompt.slice(0, 80)}`);
 
         // Record execution time
         setCronJobLastRun(jobId);
@@ -139,7 +148,7 @@ export class CronScheduler {
         await sendEmbed(job.thread_id, [{
             color: 0x5865f2,
             description: `**Scheduled Run** · ${timeStr}`,
-        }]).catch(err => log(`Failed to send separator: ${err}`));
+        }]).catch(err => log.error(`Failed to send separator for job ${jobId}: ${err}`));
 
         // Submit to runner (no sessionId — SDK auto-generates; persistSession: false to avoid filesystem clutter)
         runner.submit({
@@ -156,20 +165,21 @@ export class CronScheduler {
                 if (error) {
                     const count = (this.failures.get(jobId) || 0) + 1;
                     this.failures.set(jobId, count);
-                    log(`Job ${jobId} failed (${count}/${MAX_FAILURES}): ${error.message}`);
+                    log.error(`Job ${jobId} failed (${count}/${MAX_FAILURES}): ${error.message}`);
 
                     if (count >= MAX_FAILURES) {
-                        log(`Auto-pausing job ${jobId} after ${MAX_FAILURES} consecutive failures`);
+                        log.warn(`Auto-pausing job ${jobId} after ${MAX_FAILURES} consecutive failures`);
                         this.pause(jobId);
                         sendEmbed(job.thread_id, [{
                             color: 0xff4444,
                             title: 'Scheduled Task Auto-Paused',
                             description: `Paused after ${MAX_FAILURES} consecutive failures.\nLast error: ${truncateCodePoints(error.message, 200)}`,
-                        }]).catch(() => {});
+                        }]).catch(err => log.error(`Failed to send auto-pause embed for job ${jobId}: ${err}`));
                     }
                 } else {
                     // Reset failure count on success
                     this.failures.delete(jobId);
+                    log(`Job ${jobId} completed successfully`);
                 }
             },
         });
@@ -178,7 +188,10 @@ export class CronScheduler {
     /** Pause a job */
     pause(jobId: string): boolean {
         const job = getCronJob(jobId);
-        if (!job) return false;
+        if (!job) {
+            log.warn(`Cannot pause job ${jobId}: not found`);
+            return false;
+        }
         setCronJobEnabled(jobId, false);
         this.unregister(jobId);
         this.failures.delete(jobId);
@@ -189,7 +202,10 @@ export class CronScheduler {
     /** Resume a paused job */
     resume(jobId: string): boolean {
         const job = getCronJob(jobId);
-        if (!job) return false;
+        if (!job) {
+            log.warn(`Cannot resume job ${jobId}: not found`);
+            return false;
+        }
         setCronJobEnabled(jobId, true);
         this.register(job);
         this.failures.delete(jobId);
@@ -202,7 +218,10 @@ export class CronScheduler {
         this.unregister(jobId);
         this.failures.delete(jobId);
         const job = getCronJob(jobId);
-        if (!job) return false;
+        if (!job) {
+            log.warn(`Cannot delete job ${jobId}: not found`);
+            return false;
+        }
         deleteCronJob(jobId);
         log(`Deleted job ${jobId}`);
         return true;
@@ -211,7 +230,11 @@ export class CronScheduler {
     /** Run a job immediately (outside schedule) */
     runNow(jobId: string): boolean {
         const job = getCronJob(jobId);
-        if (!job) return false;
+        if (!job) {
+            log.warn(`Cannot run job ${jobId}: not found`);
+            return false;
+        }
+        log(`Manual run triggered for job ${jobId}`);
         this.execute(jobId);
         return true;
     }
@@ -219,7 +242,10 @@ export class CronScheduler {
     /** Get next run time for a job */
     getNextRun(jobId: string): Date | null {
         const cron = this.jobs.get(jobId);
-        if (!cron) return null;
+        if (!cron) {
+            log.debug(`No croner instance for job ${jobId}, cannot get next run`);
+            return null;
+        }
         return cron.nextRun() || null;
     }
 
@@ -236,8 +262,11 @@ export class CronScheduler {
         const jobId = crypto.randomUUID().slice(0, 8);
 
         // Create thread in parent channel
+        log(`Creating job ${jobId} in channel ${params.parentChannelId} (schedule=${params.schedule})`);
+
         const parentChannel = await this.client.channels.fetch(params.parentChannelId);
         if (!parentChannel?.isTextBased() || !(parentChannel instanceof TextChannel)) {
+            log.error(`Cannot create job ${jobId}: channel ${params.parentChannelId} is not a text channel`);
             throw new Error('Parent channel is not a text channel');
         }
 
@@ -298,8 +327,10 @@ export class CronScheduler {
 let scheduler: CronScheduler | null = null;
 
 export function initCronScheduler(client: Client): void {
+    log('Initializing CronScheduler');
     scheduler = new CronScheduler(client);
     scheduler.loadAll();
+    log('CronScheduler initialized');
 }
 
 export function getCronScheduler(): CronScheduler {
@@ -336,10 +367,12 @@ export function createCronMcpServer(
             name: z.string().optional().describe('Short display name for the task (used in thread title and listings). If omitted, the prompt is used as fallback.'),
         },
         async (args) => {
+            log(`MCP cron_create invoked: schedule=${args.schedule}, name=${args.name || '(none)'}`);
             // Validate cron expression
             try {
                 new Cron(args.schedule);
             } catch (err) {
+                log.warn(`MCP cron_create: invalid cron expression "${args.schedule}": ${err}`);
                 return {
                     content: [{ type: 'text' as const, text: `Invalid cron expression: ${err}` }],
                     isError: true,
@@ -359,6 +392,8 @@ export function createCronMcpServer(
 
                 const nextRun = sched.getNextRun(result.jobId);
 
+                log(`MCP cron_create succeeded: jobId=${result.jobId}, threadId=${result.threadId}`);
+
                 // Send reference in the source thread
                 if (sourceThreadId) {
                     await sendEmbed(sourceThreadId, [{
@@ -366,7 +401,7 @@ export function createCronMcpServer(
                         title: 'Scheduled Task Created',
                         description: `\`${args.schedule}\` → <#${result.threadId}>`,
                         footer: { text: `Job ID: ${result.jobId}` },
-                    }]).catch(err => log(`Failed to send cron ref: ${err}`));
+                    }]).catch(err => log.error(`Failed to send cron ref to thread ${sourceThreadId}: ${err}`));
                 }
 
                 return {
@@ -382,6 +417,7 @@ export function createCronMcpServer(
                     }],
                 };
             } catch (err) {
+                log.error(`MCP cron_create failed: ${err}`);
                 return {
                     content: [{ type: 'text' as const, text: `Failed to create cron job: ${err}` }],
                     isError: true,
@@ -395,7 +431,9 @@ export function createCronMcpServer(
         'List all scheduled tasks',
         {},
         async () => {
+            log.debug('MCP cron_list invoked');
             const jobs = listCronJobs();
+            log.debug(`MCP cron_list: returning ${jobs.length} jobs`);
             const result = jobs.map(j => ({
                 job_id: j.job_id,
                 name: j.name || null,
@@ -418,8 +456,10 @@ export function createCronMcpServer(
             job_id: z.string().describe('The job ID to delete'),
         },
         async (args) => {
+            log(`MCP cron_delete invoked: jobId=${args.job_id}`);
             const deleted = sched.delete(args.job_id);
             if (!deleted) {
+                log.warn(`MCP cron_delete: job not found: ${args.job_id}`);
                 return {
                     content: [{ type: 'text' as const, text: `Job not found: ${args.job_id}` }],
                     isError: true,
@@ -441,8 +481,10 @@ export function createCronMcpServer(
             prompt: z.string().optional().describe('New prompt/instruction'),
         },
         async (args) => {
+            log(`MCP cron_update invoked: jobId=${args.job_id}`);
             const job = getCronJob(args.job_id);
             if (!job) {
+                log.warn(`MCP cron_update: job not found: ${args.job_id}`);
                 return {
                     content: [{ type: 'text' as const, text: `Job not found: ${args.job_id}` }],
                     isError: true,
@@ -454,6 +496,7 @@ export function createCronMcpServer(
                 try {
                     new Cron(args.schedule);
                 } catch (err) {
+                    log.warn(`MCP cron_update: invalid cron expression "${args.schedule}": ${err}`);
                     return {
                         content: [{ type: 'text' as const, text: `Invalid cron expression: ${err}` }],
                         isError: true,
@@ -472,16 +515,18 @@ export function createCronMcpServer(
             if (args.schedule && job.enabled) {
                 const updated = getCronJob(args.job_id)!;
                 sched.register(updated);
+                log(`Re-registered job ${args.job_id} with new schedule: ${args.schedule}`);
             }
 
             // Update thread name if name changed
             if (args.name !== undefined) {
                 const newThreadName = truncateCodePoints(`\u{23F0} ${args.name}`, 50);
-                await renameThread(job.thread_id, newThreadName).catch(() => {});
+                await renameThread(job.thread_id, newThreadName).catch(err => log.error(`Failed to rename thread for job ${args.job_id}: ${err}`));
                 setThreadTitle(job.thread_id, newThreadName);
             }
 
             const changed = Object.keys(fields).join(', ');
+            log(`MCP cron_update succeeded for job ${args.job_id}: updated ${changed}`);
             return {
                 content: [{ type: 'text' as const, text: `Updated job ${args.job_id}: ${changed}` }],
             };
@@ -493,7 +538,9 @@ export function createCronMcpServer(
         'Regenerate or update the title of the current Discord thread. Clears the current title so it will be regenerated when this query completes. Use when the user asks to update, regenerate, or change the thread title.',
         {},
         async () => {
+            log.debug(`MCP title_generate invoked (sourceThreadId=${sourceThreadId || 'none'})`);
             if (!sourceThreadId) {
+                log.warn('MCP title_generate: no thread context available');
                 return {
                     content: [{ type: 'text' as const, text: 'No thread context available.' }],
                     isError: true,
@@ -502,6 +549,7 @@ export function createCronMcpServer(
 
             // Clear the title — runner will regenerate it after this query completes
             setThreadTitle(sourceThreadId, '');
+            log(`Title cleared for thread ${sourceThreadId}, will regenerate on query completion`);
 
             return {
                 content: [{ type: 'text' as const, text: 'Title will be regenerated when this response completes.' }],

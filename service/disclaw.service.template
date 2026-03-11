@@ -8,6 +8,8 @@ WorkingDirectory=__PROJECT_DIR__
 ExecStart=__BUN_PATH__ run src/bot.ts
 Restart=on-failure
 RestartSec=10
+Environment=PATH=__PATH__
+Environment=HOME=__HOME__
 EnvironmentFile=__PROJECT_DIR__/.env
 
 [Install]

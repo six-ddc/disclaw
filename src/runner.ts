@@ -74,9 +74,11 @@ class JobRunner {
         this.concurrency = options.concurrency ?? 2;
         this.maxAttempts = options.maxAttempts ?? 3;
         this.backoffBaseMs = options.backoffBaseMs ?? 1000;
+        log(`JobRunner initialized: concurrency=${this.concurrency}, maxAttempts=${this.maxAttempts}, backoffBaseMs=${this.backoffBaseMs}`);
     }
 
     submit(job: ClaudeJob): void {
+        log(`Job submitted by ${job.username} for thread=${job.threadId}, sessionId=${job.sessionId || '(none)'}, resume=${job.resume}, model=${job.model || '(default)'}`);
         // Per-thread serialization: only one job per thread at a time
         if (this.runningThreads.has(job.threadId)) {
             let queue = this.threadQueues.get(job.threadId);
@@ -85,7 +87,7 @@ class JobRunner {
                 this.threadQueues.set(job.threadId, queue);
             }
             queue.push(job);
-            log(`Thread ${job.threadId} busy, queued (${queue.length} pending for thread)`);
+            log(`Thread ${job.threadId} busy, queued by ${job.username} (${queue.length} pending for thread)`);
             // Add loading reaction to indicate the message is queued
             if (job.sourceMessageId) {
                 addReaction(job.threadId, job.sourceMessageId, '⏳').catch(() => {});
@@ -97,9 +99,10 @@ class JobRunner {
 
         if (this.active < this.concurrency) {
             this.active++;
+            log(`Job started immediately for ${job.username}, active=${this.active}/${this.concurrency}, globalPending=${this.pending.length}`);
             this.run(job);
         } else {
-            log(`Queue full (${this.active}/${this.concurrency}), job queued for ${job.username}`);
+            log(`Queue full (${this.active}/${this.concurrency}), job queued for ${job.username}, globalPending=${this.pending.length + 1}`);
             this.pending.push(job);
         }
     }
@@ -109,6 +112,7 @@ class JobRunner {
             await this.executeWithRetry(job, 1);
         } finally {
             this.active--;
+            log.debug(`Slot released for thread=${job.threadId}, active=${this.active}/${this.concurrency}`);
 
             // Promote next per-thread job to global pending queue
             const queue = this.threadQueues.get(job.threadId);
@@ -117,16 +121,20 @@ class JobRunner {
                 if (queue.length === 0) this.threadQueues.delete(job.threadId);
                 // Keep runningThreads mark; prioritize by pushing to front
                 this.pending.unshift(next);
+                log.debug(`Promoted next thread-queued job for thread=${job.threadId} to global pending (remaining in thread queue: ${queue.length})`);
             } else {
                 this.runningThreads.delete(job.threadId);
+                log.debug(`Thread ${job.threadId} removed from runningThreads`);
             }
 
             // Fill concurrency slots from global queue
             const next = this.pending.shift();
             if (next) {
                 this.active++;
+                log(`Dequeued job for ${next.username} thread=${next.threadId}, active=${this.active}/${this.concurrency}, globalPending=${this.pending.length}`);
                 this.run(next);
             } else if (this.active === 0 && this.drainResolve) {
+                log(`All jobs drained, resolving drain promise`);
                 this.drainResolve();
                 this.drainResolve = null;
             }
@@ -142,24 +150,29 @@ class JobRunner {
         // Lazy session resolution: when resume is undefined, resolve from DB at execution time
         // This ensures queued per-thread jobs always get the latest session state
         if (job.resume === undefined) {
+            log.debug(`Lazy session resolution for thread=${job.threadId}`);
             const mapping = getThreadMapping(job.threadId);
             if (mapping) {
                 const session = resolveSessionState(job.threadId, mapping);
                 job = { ...job, ...session };
+                log.debug(`Resolved session from DB: sessionId=${job.sessionId || '(empty)'}, resume=${job.resume}`);
             } else {
                 // Thread mapping gone (e.g. deleted) — treat as new session
                 job = { ...job, sessionId: '', resume: false };
+                log.warn(`Thread mapping not found for thread=${job.threadId}, treating as new session`);
             }
         }
 
-        log(`Processing job for ${job.username} (attempt ${attempt})`);
-        log(`Session: ${job.sessionId || '(auto)'}, Resume: ${job.resume}`);
+        log(`Processing job for ${job.username} thread=${job.threadId} (attempt ${attempt}/${this.maxAttempts})`);
+        log(`Session: ${job.sessionId || '(auto)'}, Resume: ${job.resume}, workingDir=${job.workingDir || '(default)'}, model=${job.model || '(default)'}`);
 
         const sender = createClaudeSender(job.threadId);
         // Resolve display mode: DB mapping > default
         const mapping = getThreadMapping(job.threadId);
         const displayMode: DisplayMode = (mapping?.display_mode as DisplayMode) || 'verbose';
+        log.debug(`Display mode for thread=${job.threadId}: ${displayMode}`);
         const pager = displayMode === 'pager' ? createToolPager(job.threadId) : null;
+        if (pager) log.debug(`Pager created for thread=${job.threadId}`);
         let lastResultText = '';
 
         const canUseTool = createCanUseTool(job.threadId);
@@ -179,12 +192,13 @@ class JobRunner {
                 canUseTool,
                 onQuery: (q) => {
                     this.activeQueries.set(job.threadId, q);
+                    log.debug(`Query object registered for thread=${job.threadId}`);
                     // Cache supported models from the first available query
                     if (this.cachedModels.length === 0) {
                         q.supportedModels().then(models => {
                             this.cachedModels = models;
                             log(`Cached ${models.length} supported models`);
-                        }).catch(e => log(`Failed to fetch supported models: ${e}`));
+                        }).catch(e => log.warn(`Failed to fetch supported models: ${e}`));
                     }
                 },
                 onMessage: async (sdkMessage) => {
@@ -251,13 +265,14 @@ class JobRunner {
                         }
                     }
                     } catch (err) {
-                        log(`onMessage error (non-fatal): ${err}`);
+                        log.error(`onMessage error (non-fatal) for thread=${job.threadId}: ${err}`);
                     }
                 },
             });
 
             this.activeQueries.delete(job.threadId);
             cleanupThread(job.threadId);
+            log.debug(`Cleaned up query and thread state for thread=${job.threadId}`);
             // Remove eyes reaction now that processing is done
             if (job.eyesReaction) {
                 removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
@@ -276,19 +291,20 @@ class JobRunner {
             if (job.statusMessageId && job.parentChannelId && lastResultText) {
                 const statusText = truncateCodePoints(lastResultText, 2000);
                 await editMessage(job.parentChannelId, job.statusMessageId, statusText).catch(err => {
-                    log(`Failed to update status message: ${err}`);
+                    log.warn(`Failed to update status message for thread=${job.threadId}: ${err}`);
                 });
             }
 
             // Generate title on first completion (async, non-blocking)
             if (!getThreadTitle(job.threadId) && lastResultText) {
+                log.debug(`Triggering title generation for thread=${job.threadId}`);
                 const promptText = typeof job.prompt === 'string'
                     ? job.prompt
                     : job.prompt.type === 'text' ? job.prompt.text : job.prompt.textSummary;
                 this.generateAndSetTitle(job.threadId, promptText, lastResultText);
             }
 
-            log(`Job completed for ${job.username}`);
+            log(`Job completed for ${job.username} thread=${job.threadId}, resultSessionId=${resultSessionId}`);
             job.onComplete?.();
         } catch (error) {
             this.activeQueries.delete(job.threadId);
@@ -301,26 +317,31 @@ class JobRunner {
 
             // Update status message to error state
             if (job.statusMessageId && job.parentChannelId) {
-                await editMessage(job.parentChannelId, job.statusMessageId, `❌ Error`).catch(() => {});
+                await editMessage(job.parentChannelId, job.statusMessageId, `❌ Error`).catch((err) => {
+                    log.warn(`Failed to update status message to error state for thread=${job.threadId}: ${err}`);
+                });
             }
 
             const errMsg = error instanceof Error ? error.message : String(error);
             const errStack = error instanceof Error ? error.stack : '';
-            log(`Job failed for ${job.username} (attempt ${attempt}): ${errMsg}`);
-            if (errStack) log(`Stack: ${errStack}`);
+            log.error(`Job failed for ${job.username} thread=${job.threadId} (attempt ${attempt}/${this.maxAttempts}): ${errMsg}`);
+            if (errStack) log.error(`Stack trace for thread=${job.threadId}: ${errStack}`);
 
             if (attempt < this.maxAttempts) {
                 const delay = this.backoffBaseMs * Math.pow(2, attempt - 1);
-                log(`Retrying in ${delay}ms...`);
+                log(`Retrying job for ${job.username} thread=${job.threadId} in ${delay}ms (next attempt ${attempt + 1}/${this.maxAttempts})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
                 return this.executeWithRetry(job, attempt + 1);
             }
 
+            log.error(`Job exhausted all ${this.maxAttempts} attempts for ${job.username} thread=${job.threadId}, giving up`);
             job.onComplete?.(error instanceof Error ? error : new Error(String(error)));
             await sendToThread(
                 job.threadId,
                 `Something went wrong. Try again?\n\`\`\`${error}\`\`\``
-            );
+            ).catch((sendErr) => {
+                log.error(`Failed to send error message to thread=${job.threadId}: ${sendErr}`);
+            });
         }
     }
 
@@ -335,31 +356,37 @@ class JobRunner {
     async interrupt(threadId: string): Promise<boolean> {
         const q = this.activeQueries.get(threadId);
         if (!q) {
-            log(`Interrupt: no active query for thread ${threadId}`);
+            log.warn(`Interrupt requested but no active query for thread=${threadId}`);
             return false;
         }
-        log(`Interrupting query for thread ${threadId}`);
-        await q.interrupt();
+        log(`Interrupting query for thread=${threadId}`);
+        try {
+            await q.interrupt();
+            log(`Interrupt completed for thread=${threadId}`);
+        } catch (err) {
+            log.error(`Interrupt failed for thread=${threadId}: ${err}`);
+            throw err;
+        }
         return true;
     }
 
     /** Generate a title via AI and update both DB and Discord thread name. */
     private async generateAndSetTitle(threadId: string, prompt: string, reply: string): Promise<void> {
         try {
-            log(`Generating title for thread ${threadId}`);
+            log.debug(`Generating title for thread=${threadId}`);
             const title = await generateTitle([
                 { role: 'user', text: prompt },
                 { role: 'assistant', text: reply },
             ]);
             if (!title) {
-                log(`Empty title generated for thread ${threadId}`);
+                log.warn(`Empty title generated for thread=${threadId}`);
                 return;
             }
             setThreadTitle(threadId, title);
             await renameThread(threadId, truncateCodePoints(title, 100));
             log(`Title set for thread ${threadId}: ${title}`);
         } catch (err) {
-            log(`Failed to generate title: ${err}`);
+            log.error(`Failed to generate title for thread=${threadId}: ${err}`);
         }
     }
 
@@ -368,8 +395,10 @@ class JobRunner {
      */
     drain(): Promise<void> {
         if (this.active === 0 && this.pending.length === 0) {
+            log.debug(`Drain called with no active/pending jobs, resolving immediately`);
             return Promise.resolve();
         }
+        log(`Drain requested: waiting for active=${this.active}, globalPending=${this.pending.length}, threadQueues=${this.threadQueues.size}`);
         return new Promise(resolve => {
             this.drainResolve = resolve;
         });

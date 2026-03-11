@@ -50,19 +50,24 @@ export function validateWorkingDir(dir: string): string | null {
     const resolved = resolve(dir);
     if (!ALLOWED_DIRS) {
         if (!existsSync(resolved)) {
+            log.debug(`validateWorkingDir: directory not found: ${resolved}`);
             return `Directory not found: \`${dir}\``;
         }
+        log.debug(`validateWorkingDir: ok (no allowlist) → ${resolved}`);
         return null;
     }
     const isAllowed = ALLOWED_DIRS.some(allowed =>
         resolved === allowed || resolved.startsWith(allowed + '/')
     );
     if (!isAllowed) {
+        log.warn(`validateWorkingDir: ${resolved} not in allowed list`);
         return `Directory not in allowed list. Allowed: ${ALLOWED_DIRS.join(', ')}`;
     }
     if (!existsSync(resolved)) {
+        log.debug(`validateWorkingDir: directory not found: ${resolved}`);
         return `Directory not found: \`${dir}\``;
     }
+    log.debug(`validateWorkingDir: ok → ${resolved}`);
     return null;
 }
 
@@ -73,12 +78,14 @@ export function validateWorkingDir(dir: string): string | null {
 /** Validate that the interaction is in a thread with an active session. */
 function requireThreadSession(interaction: ChatInputCommandInteraction) {
     if (!interaction.channel?.isThread()) {
+        log.debug(`requireThreadSession: rejected — not in a thread (channel=${interaction.channelId}, user=${interaction.user.tag})`);
         interaction.reply({ content: 'This command can only be used in a Disclaw thread.', flags: MessageFlags.Ephemeral });
         return null;
     }
     const threadId = interaction.channel.id;
     const mapping = getThreadMapping(threadId);
     if (!mapping) {
+        log.debug(`requireThreadSession: rejected — no mapping for thread ${threadId} (user=${interaction.user.tag})`);
         interaction.reply({ content: 'No active session in this thread.', flags: MessageFlags.Ephemeral });
         return null;
     }
@@ -91,12 +98,14 @@ function requireThreadSession(interaction: ChatInputCommandInteraction) {
 
 export async function handleCd(interaction: ChatInputCommandInteraction) {
     const isThread = interaction.channel?.isThread();
+    log(`/disclaw cd invoked by ${interaction.user.tag} in ${isThread ? 'thread' : 'channel'} ${interaction.channelId}`);
 
     // Thread context: require an active session
     if (isThread) {
         const threadId = interaction.channel!.id;
         const mapping = getThreadMapping(threadId);
         if (!mapping) {
+            log.warn(`cd: no mapping for thread ${threadId}`);
             await interaction.reply({ content: 'No active session in this thread.', flags: MessageFlags.Ephemeral });
             return;
         }
@@ -108,19 +117,24 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
         const startDir = mapping.working_dir ||
             getChannelConfigCached(parentId)?.working_dir ||
             process.env.CLAUDE_WORKING_DIR || process.cwd();
+        log.debug(`cd: start dir resolved to ${startDir} for thread ${threadId}`);
 
         const selected = await startDirPicker(interaction, startDir);
-        if (!selected) return;
+        if (!selected) {
+            log.debug(`cd: dir picker cancelled in thread ${threadId}`);
+            return;
+        }
 
         const validationError = validateWorkingDir(selected);
         if (validationError) {
+            log.warn(`cd: validation failed for "${selected}" in thread ${threadId}: ${validationError}`);
             await interaction.editReply({ content: validationError, components: [] });
             return;
         }
 
         updateThreadWorkingDir(threadId, selected);
         updateThreadSession(threadId, null); // Clear session — new dir needs fresh session
-        log(`Thread ${threadId} working dir set to: ${selected}`);
+        log(`Thread ${threadId} working dir set to: ${selected} (session cleared)`);
         return;
     }
 
@@ -129,12 +143,17 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
 
     const currentConfig = getChannelConfigCached(interaction.channelId);
     const startDir = currentConfig?.working_dir || process.env.CLAUDE_WORKING_DIR || process.cwd();
+    log.debug(`cd: channel start dir resolved to ${startDir} for channel ${interaction.channelId}`);
 
     const selected = await startDirPicker(interaction, startDir);
-    if (!selected) return;
+    if (!selected) {
+        log.debug(`cd: dir picker cancelled in channel ${interaction.channelId}`);
+        return;
+    }
 
     const validationError = validateWorkingDir(selected);
     if (validationError) {
+        log.warn(`cd: validation failed for "${selected}" in channel ${interaction.channelId}: ${validationError}`);
         await interaction.editReply({ content: validationError, components: [] });
         return;
     }
@@ -144,31 +163,36 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
 }
 
 export async function handleClear(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw clear invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
     updateThreadSession(ctx.threadId, null);
     await interaction.reply({ content: 'Context cleared.', flags: MessageFlags.Ephemeral });
-    log(`Context cleared in thread ${ctx.threadId}`);
+    log(`Context cleared in thread ${ctx.threadId} by ${interaction.user.tag}`);
 }
 
 export async function handleInterrupt(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw interrupt invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
     if (!runner.isRunning(ctx.threadId)) {
+        log.debug(`interrupt: nothing running in thread ${ctx.threadId}`);
         await interaction.reply({ content: 'Nothing running.', flags: MessageFlags.Ephemeral });
         return;
     }
     await runner.interrupt(ctx.threadId);
     await interaction.reply({ content: 'Interrupted.', flags: MessageFlags.Ephemeral });
-    log(`Interrupted job in thread ${ctx.threadId}`);
+    log(`Interrupted job in thread ${ctx.threadId} by ${interaction.user.tag}`);
 }
 
 export async function handleModel(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw model invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
 
     const models = runner.getModels();
     if (models.length === 0) {
+        log.warn(`model: model list not available yet for thread ${ctx.threadId}`);
         await interaction.reply({
             content: 'Model list not available yet. Send a message first, then try again.',
             flags: MessageFlags.Ephemeral,
@@ -178,6 +202,7 @@ export async function handleModel(interaction: ChatInputCommandInteraction) {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+    log.debug(`model: presenting ${models.length} models (current=${ctx.mapping.model}) in thread ${ctx.threadId}`);
     const select = new StringSelectMenuBuilder()
         .setCustomId('disclaw_model_select')
         .setPlaceholder('Pick a model')
@@ -200,6 +225,7 @@ export async function handleModel(interaction: ChatInputCommandInteraction) {
             time: 60_000,
         }) as StringSelectMenuInteraction;
     } catch {
+        log.debug(`model: selection timed out in thread ${ctx.threadId}`);
         await interaction.editReply({ content: 'Selection timed out.', components: [] });
         return;
     }
@@ -211,14 +237,16 @@ export async function handleModel(interaction: ChatInputCommandInteraction) {
         content: `Model set to **${modelInfo?.displayName || modelValue}**.`,
         components: [],
     });
-    log(`Model set to ${modelValue} in thread ${ctx.threadId}`);
+    log(`Model set to ${modelValue} in thread ${ctx.threadId} by ${interaction.user.tag}`);
 }
 
 export async function handleFork(interaction: ChatInputCommandInteraction, client: Client) {
+    log(`/disclaw fork invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
 
     if (!ctx.mapping.session_id) {
+        log.warn(`fork: no session to fork in thread ${ctx.threadId} (context was cleared)`);
         await interaction.reply({ content: 'No session to fork (context was cleared).', flags: MessageFlags.Ephemeral });
         return;
     }
@@ -228,6 +256,7 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
     try {
         const thread = interaction.channel!;
         if (!thread.isThread() || !thread.parentId) {
+            log.warn(`fork: could not find parent channel for thread ${ctx.threadId}`);
             await interaction.editReply('Could not find parent channel.');
             return;
         }
@@ -235,6 +264,7 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
 
         const parentChannel = await client.channels.fetch(parentChannelId);
         if (!parentChannel?.isTextBased()) {
+            log.warn(`fork: parent channel ${parentChannelId} is not a text channel`);
             await interaction.editReply('Parent channel is not a text channel.');
             return;
         }
@@ -244,6 +274,7 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
             getChannelConfigCached(parentChannelId)?.working_dir ||
             process.env.CLAUDE_WORKING_DIR ||
             process.cwd());
+        log.debug(`fork: working dir resolved to ${workingDir} for thread ${ctx.threadId}`);
 
         // Create status message and new thread in parent channel
         const statusMessage = await (parentChannel as TextChannel).send('Forked conversation');
@@ -262,14 +293,15 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
         await sendHistory(newThread.id, ctx.mapping.session_id, workingDir);
 
         await interaction.editReply(`Forked → <#${newThread.id}>`);
-        log(`Forked thread ${ctx.threadId} → ${newThread.id}`);
+        log(`Forked thread ${ctx.threadId} → ${newThread.id} (session=${ctx.mapping.session_id}) by ${interaction.user.tag}`);
     } catch (error) {
-        log(`Fork failed: ${error}`);
+        log.error(`fork: failed for thread ${ctx.threadId}: ${error}`);
         await interaction.editReply('Failed to fork conversation.');
     }
 }
 
 export async function handleResume(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw resume invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
@@ -284,15 +316,18 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
             threadMapping?.working_dir ||
             channelConfig?.working_dir ||
             process.env.CLAUDE_WORKING_DIR || process.cwd());
+        log.debug(`resume: working dir resolved to ${workingDir}`);
 
         // List recent sessions
         const sessions = await listSessions({ dir: workingDir, limit: 25 });
         if (sessions.length === 0) {
+            log.debug(`resume: no sessions found in ${workingDir}`);
             await interaction.editReply('No sessions found.');
             return;
         }
 
         const top = sessions.slice(0, 25);
+        log.debug(`resume: found ${sessions.length} sessions, presenting ${top.length}`);
 
         // Build select menu — use summary/firstPrompt (already available), no extra fetches
         const select = new StringSelectMenuBuilder()
@@ -325,6 +360,7 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
                 time: 60_000,
             }) as StringSelectMenuInteraction;
         } catch {
+            log.debug(`resume: selection timed out for ${interaction.user.tag}`);
             await interaction.editReply({ content: 'Selection timed out.', components: [] });
             return;
         }
@@ -344,8 +380,9 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
                     description: `**Resumed session** · \`${workingDir}\``,
                 }]);
                 await sendHistory(threadId, selectedSessionId, workingDir);
-                log(`Resumed session ${selectedSessionId} in thread ${threadId}`);
+                log(`Resumed session ${selectedSessionId} in thread ${threadId} by ${interaction.user.tag}`);
             } else {
+                log.warn(`resume: no mapping for thread ${threadId} when trying to resume`);
                 await selected.update({ content: 'No active session in this thread.', components: [] });
             }
         } else {
@@ -367,21 +404,24 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
                 description: `**Resumed session** · \`${workingDir}\``,
             }]);
             await sendHistory(newThread.id, selectedSessionId, workingDir);
-            log(`Resumed session ${selectedSessionId} in new thread ${newThread.id}`);
+            log(`Resumed session ${selectedSessionId} in new thread ${newThread.id} by ${interaction.user.tag}`);
         }
     } catch (error) {
-        log(`Resume failed: ${error}`);
+        log.error(`resume: failed for ${interaction.user.tag}: ${error}`);
         await interaction.editReply({ content: 'Failed to list sessions.', components: [] });
     }
 }
 
 export async function handleCron(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw cron invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const jobs = listCronJobs();
     if (jobs.length === 0) {
+        log.debug('cron: no scheduled tasks found');
         await interaction.editReply('No scheduled tasks.');
         return;
     }
+    log.debug(`cron: listing ${jobs.length} scheduled tasks`);
     const lines = jobs.map(job => {
         const status = job.enabled ? '\u{1F7E2}' : '\u{23F8}\u{FE0F}';
         return `${status} \`${job.schedule}\` — **${cronJobDisplayName(job)}** → <#${job.thread_id}>`;
@@ -405,12 +445,14 @@ const PERMISSION_MODES = [
 ] as const;
 
 export async function handlePermission(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw permission invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const currentMode = ctx.mapping.permission_mode || process.env.DISCLAW_PERMISSION_MODE || 'default';
+    log.debug(`permission: current mode=${currentMode} in thread ${ctx.threadId}`);
 
     const select = new StringSelectMenuBuilder()
         .setCustomId('disclaw_permission_select')
@@ -437,6 +479,7 @@ export async function handlePermission(interaction: ChatInputCommandInteraction)
             time: 60_000,
         }) as StringSelectMenuInteraction;
     } catch {
+        log.debug(`permission: selection timed out in thread ${ctx.threadId}`);
         await interaction.editReply({ content: 'Selection timed out.', components: [] });
         return;
     }
@@ -452,7 +495,7 @@ export async function handlePermission(interaction: ChatInputCommandInteraction)
         content: `Permission mode set to **${modeInfo?.label || modeValue}**: ${modeInfo?.description || ''}`,
         components: [],
     });
-    log(`Permission mode set to ${modeValue} in thread ${ctx.threadId}`);
+    log(`Permission mode set to ${modeValue} in thread ${ctx.threadId} by ${interaction.user.tag}`);
 }
 
 /** Display mode definitions */
@@ -463,12 +506,14 @@ const DISPLAY_MODES = [
 ] as const;
 
 export async function handleDisplay(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw display invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const currentMode = ctx.mapping.display_mode || 'verbose';
+    log.debug(`display: current mode=${currentMode} in thread ${ctx.threadId}`);
 
     const select = new StringSelectMenuBuilder()
         .setCustomId('disclaw_display_select')
@@ -495,6 +540,7 @@ export async function handleDisplay(interaction: ChatInputCommandInteraction) {
             time: 60_000,
         }) as StringSelectMenuInteraction;
     } catch {
+        log.debug(`display: selection timed out in thread ${ctx.threadId}`);
         await interaction.editReply({ content: 'Selection timed out.', components: [] });
         return;
     }
@@ -509,5 +555,5 @@ export async function handleDisplay(interaction: ChatInputCommandInteraction) {
         content: `Display mode set to **${modeInfo?.label || modeValue}**: ${modeInfo?.description || ''}`,
         components: [],
     });
-    log(`Display mode set to ${modeValue} in thread ${ctx.threadId}`);
+    log(`Display mode set to ${modeValue} in thread ${ctx.threadId} by ${interaction.user.tag}`);
 }
