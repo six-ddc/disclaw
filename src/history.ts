@@ -97,7 +97,7 @@ function buildHistoryMessage(state: HistoryState) {
             color: 0x5865f2,
             title: '📜 Conversation History',
             description,
-            footer: { text: `Page ${page + 1}/${totalPages} · ${entries.length} messages` },
+            footer: { text: `${entries.length} messages` },
         }],
         components,
     };

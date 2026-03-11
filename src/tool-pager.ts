@@ -201,9 +201,11 @@ function buildLiveEmbed(state: LivePagerState): EmbedData {
 
 async function doFlush(state: LivePagerState): Promise<void> {
     state.pendingUpdate = false;
-    if (state.destroyed && !state.messageId) return;
+    if (state.pages.length === 0) return;
 
     const embed = buildLiveEmbed(state);
+    const action = state.messageId ? 'edit' : 'send';
+    log.debug(`[${state.id}] doFlush: ${action}, page=${state.currentPage}/${state.pages.length}`);
 
     try {
         const components = state.pages.length > 1
@@ -214,6 +216,7 @@ async function doFlush(state: LivePagerState): Promise<void> {
                 embeds: [embed],
                 components,
             });
+            log(`[${state.id}] Initial message sent: messageId=${state.messageId}`);
         } else {
             await editRichMessage(state.threadId, state.messageId, {
                 embeds: [embed],
@@ -221,7 +224,7 @@ async function doFlush(state: LivePagerState): Promise<void> {
             });
         }
     } catch (e) {
-        log(`Failed to update pager: ${e}`);
+        log.error(`[${state.id}] doFlush failed: ${e}`);
     }
 
     if (state.pendingUpdate) {
@@ -284,7 +287,7 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
                     pages.push({
                         kind: 'text',
                         label: 'Assistant',
-                        content: truncatePreview(text, 20, 3500),
+                        content: truncatePreview(text, Infinity, 3800),
                         status: 'done',
                     });
                 }
@@ -372,6 +375,7 @@ export function createToolPager(threadId: string): ToolPager {
     };
 
     activePagers.set(id, state);
+    log(`[${id}] Created pager for thread=${threadId}`);
 
     return {
         trackRawMessage(sdkMessage: { type: string; uuid?: string }): void {
@@ -379,6 +383,7 @@ export function createToolPager(threadId: string): ToolPager {
                 && (sdkMessage.type === 'user' || sdkMessage.type === 'assistant')
                 && sdkMessage.uuid) {
                 state.firstMessageUuid = sdkMessage.uuid;
+                log(`[${id}] Captured firstMessageUuid=${sdkMessage.uuid} (type=${sdkMessage.type})`);
             }
         },
 
@@ -403,6 +408,7 @@ export function createToolPager(threadId: string): ToolPager {
                         state.toolUseIdToPage.set(toolUseId, pageIdx);
                     }
                     state.currentPage = pageIdx;
+                    log.debug(`[${id}] +tool_use page=${pageIdx} tool=${toolName}`);
                     scheduleUpdate(state);
                     break;
                 }
@@ -426,6 +432,7 @@ export function createToolPager(threadId: string): ToolPager {
                         status: 'done',
                     });
                     state.currentPage = state.pages.length - 1;
+                    log.debug(`[${id}] +thinking page=${state.currentPage}`);
                     scheduleUpdate(state);
                     break;
                 }
@@ -435,10 +442,11 @@ export function createToolPager(threadId: string): ToolPager {
                         state.pages.push({
                             kind: 'text',
                             label: 'Assistant',
-                            content: truncatePreview(text, 20, 3500),
+                            content: truncatePreview(text, Infinity, 3800),
                             status: 'done',
                         });
                         state.currentPage = state.pages.length - 1;
+                        log.debug(`[${id}] +text page=${state.currentPage}`);
                         scheduleUpdate(state);
                     }
                     break;
@@ -453,6 +461,7 @@ export function createToolPager(threadId: string): ToolPager {
         },
 
         async destroy(sessionId: string, workingDir: string): Promise<void> {
+            log(`[${id}] destroy() called: session=${sessionId}, pages=${state.pages.length}, messageId=${state.messageId}, firstUuid=${state.firstMessageUuid}`);
             state.destroyed = true;
 
             // Flush pending updates
@@ -468,6 +477,7 @@ export function createToolPager(threadId: string): ToolPager {
             }
 
             if (!state.messageId || state.pages.length === 0) {
+                log(`[${id}] destroy() early exit: messageId=${state.messageId}, pages=${state.pages.length}`);
                 activePagers.delete(id);
                 return;
             }
@@ -476,6 +486,7 @@ export function createToolPager(threadId: string): ToolPager {
             try {
                 const allMessages = await getSessionMessages(sessionId, { dir: workingDir });
                 const typedMessages = allMessages as Array<{ type: string; uuid: string; message: unknown }>;
+                log(`[${id}] Session has ${typedMessages.length} total messages`);
 
                 // Find offset by matching first message UUID.
                 // The SDK doesn't stream the initial user prompt, so firstMessageUuid
@@ -487,15 +498,41 @@ export function createToolPager(threadId: string): ToolPager {
                     if (idx >= 0) {
                         msgOffset = idx > 0 && typedMessages[idx - 1]!.type === 'user'
                             ? idx - 1 : idx;
+                        log(`[${id}] UUID found at idx=${idx}, msgOffset=${msgOffset}`);
                     } else {
-                        log.warn(`UUID ${state.firstMessageUuid} not found in session, showing all pages`);
+                        log.warn(`[${id}] UUID ${state.firstMessageUuid} not found in session, showing all pages`);
                     }
                 }
-                const msgLimit = typedMessages.length - msgOffset;
-                const currentRoundMessages = typedMessages.slice(msgOffset);
+
+                // Find the end of this round: the next user text message (non-tool_result)
+                // after the offset marks the start of the next round.
+                let msgEnd = typedMessages.length;
+                for (let i = msgOffset + 1; i < typedMessages.length; i++) {
+                    const m = typedMessages[i]!;
+                    if (m.type !== 'user') continue;
+                    const msg = m.message as Record<string, unknown>;
+                    const content = msg.content;
+                    // User text message = new round boundary
+                    if (typeof content === 'string') {
+                        msgEnd = i;
+                        break;
+                    }
+                    if (Array.isArray(content)) {
+                        const hasOnlyToolResult = (content as Array<Record<string, unknown>>).every(b => b.type === 'tool_result');
+                        if (!hasOnlyToolResult) {
+                            msgEnd = i;
+                            break;
+                        }
+                    }
+                }
+                const msgLimit = msgEnd - msgOffset;
+                log(`[${id}] Round boundary: offset=${msgOffset}, end=${msgEnd}, limit=${msgLimit}`);
+
+                const currentRoundMessages = typedMessages.slice(msgOffset, msgEnd);
                 const pages = parseSessionPages(currentRoundMessages);
                 const total = pages.length;
                 const pageIdx = Math.min(state.currentPage, Math.max(0, total - 1));
+                log(`[${id}] Parsed ${total} pages from round (Phase 1 had ${state.pages.length}), showing page ${pageIdx}`);
 
                 if (total > 0) {
                     const embed = buildPageEmbed(pages[pageIdx]!, pageIdx, total);
@@ -506,18 +543,57 @@ export function createToolPager(threadId: string): ToolPager {
                         embeds: [embed],
                         components,
                     });
-                    log(`Pager ${id} finalized: session=${sessionId}, msgOffset=${msgOffset}, msgLimit=${msgLimit}, pages=${total}`);
+                    log(`[${id}] Finalized: session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, pages=${total}`);
                 }
-            } catch (e) {
-                log(`Failed to finalize pager: ${e}`);
-            }
 
-            // Free memory
-            activePagers.delete(id);
-            state.pages.length = 0;
-            state.toolUseIdToPage.clear();
+                // Free memory only after successful finalization
+                activePagers.delete(id);
+                state.pages.length = 0;
+                state.toolUseIdToPage.clear();
+            } catch (e) {
+                log.error(`[${id}] Failed to finalize, keeping Phase 1 buttons alive: ${e}`);
+                // Don't delete from activePagers — Phase 1 buttons remain functional
+                state.destroyed = false;
+            }
         },
     };
+}
+
+/** Find the offset/limit for the last round in a session (for auto-upgrade fallback). */
+async function findLastRoundBounds(sessionId: string, dir?: string): Promise<{ offset: number; limit: number }> {
+    try {
+        const allMessages = await getSessionMessages(sessionId, { dir });
+        const typedMessages = allMessages as Array<{ type: string; message: unknown }>;
+
+        // Find all round start indices (user text messages that aren't pure tool_result)
+        const roundStarts: number[] = [];
+        for (let i = 0; i < typedMessages.length; i++) {
+            const m = typedMessages[i]!;
+            if (m.type !== 'user') continue;
+            const msg = m.message as Record<string, unknown>;
+            const content = msg.content;
+            if (typeof content === 'string') {
+                roundStarts.push(i);
+            } else if (Array.isArray(content)) {
+                const hasOnlyToolResult = (content as Array<Record<string, unknown>>).every(b => b.type === 'tool_result');
+                if (!hasOnlyToolResult) {
+                    roundStarts.push(i);
+                }
+            }
+        }
+
+        if (roundStarts.length === 0) {
+            return { offset: 0, limit: 0 };
+        }
+
+        const lastRoundStart = roundStarts[roundStarts.length - 1]!;
+        const limit = typedMessages.length - lastRoundStart;
+        log(`findLastRoundBounds: session=${sessionId}, rounds=${roundStarts.length}, lastRoundOffset=${lastRoundStart}, limit=${limit}`);
+        return { offset: lastRoundStart, limit };
+    } catch (e) {
+        log.warn(`findLastRoundBounds failed: ${e}`);
+        return { offset: 0, limit: 0 };
+    }
 }
 
 /**
@@ -537,7 +613,29 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
 
         const state = activePagers.get(pagerId);
         if (!state) {
+            log(`Phase 1 interaction: pagerId=${pagerId} not found, attempting auto-upgrade`);
+            // Defer immediately — auto-upgrade involves SDK calls that may be slow
             await interaction.deferUpdate();
+            // State lost (e.g. bot restart) — try to auto-upgrade to Phase 2
+            // by looking up the thread's session from DB
+            try {
+                const threadId = interaction.channelId;
+                const mapping = threadId ? getThreadMapping(threadId) : null;
+                if (mapping?.session_id) {
+                    const dir = mapping.working_dir || undefined;
+                    // Find the last round's offset/limit for scoped page display
+                    const { offset, limit } = await findLastRoundBounds(mapping.session_id, dir);
+                    const result = await renderPersistentPage(mapping.session_id, Infinity, offset, limit, dir);
+                    if (result) {
+                        const row = buildPersistentButtons(mapping.session_id, result.pageIdx, result.total, offset, limit);
+                        await interaction.editReply({ embeds: [result.embed], components: [row] });
+                        log(`Phase 1→2 auto-upgrade: thread=${threadId}, session=${mapping.session_id}, offset=${offset}, limit=${limit}, pages=${result.total}`);
+                        return true;
+                    }
+                }
+            } catch (e) {
+                log.warn(`Phase 1→2 auto-upgrade failed: ${e}`);
+            }
             return true;
         }
 
@@ -595,23 +693,31 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
             pageIdx++;
         }
 
+        // Defer immediately to avoid Discord's 3-second interaction timeout
+        // (SDK getSessionMessages can be slow on cold file cache)
+        await interaction.deferUpdate();
+
         try {
             const threadId = interaction.channelId;
             const mapping = threadId ? getThreadMapping(threadId) : null;
             const dir = mapping?.working_dir || undefined;
+            log.debug(`Phase 2 interaction: session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, page=${pageIdx}, action=${action}`);
             const result = await renderPersistentPage(sessionId, pageIdx, msgOffset, msgLimit, dir);
             if (result) {
                 const row = buildPersistentButtons(sessionId, result.pageIdx, result.total, msgOffset, msgLimit);
-                await interaction.update({
+                await interaction.editReply({
                     embeds: [result.embed],
                     components: [row],
                 });
             } else {
-                await interaction.deferUpdate();
+                log.warn(`Persistent pager: no pages found for session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, dir=${dir}`);
+                await interaction.editReply({
+                    embeds: [{ color: 0xed4245, description: 'Session data not found.' }],
+                    components: [],
+                });
             }
         } catch (e) {
-            log(`Failed to handle persistent pager interaction: ${e}`);
-            await interaction.deferUpdate();
+            log.error(`Failed to handle persistent pager interaction: ${e}`);
         }
         return true;
     }
