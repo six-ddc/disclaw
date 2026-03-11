@@ -255,14 +255,40 @@ export function createClaudeSender(threadId: string) {
                             fields,
                         }];
                     } else {
-                        const inputStr = JSON.stringify(toolInput, null, 2);
-                        const { preview } = truncateContent(inputStr, 10, 800);
-
-                        embeds = [{
-                            color: 0x0099ff,
-                            title: `🔧 \`${displayName}\``,
-                            description: `\`\`\`json\n${preview}\n\`\`\``,
-                        }];
+                        const keys = Object.keys(toolInput);
+                        if (keys.length === 0) {
+                            embeds = [{
+                                color: 0x0099ff,
+                                title: `🔧 \`${displayName}\``,
+                            }];
+                        } else {
+                            const fields: Array<{ name: string; value: string; inline?: boolean }> = [];
+                            for (const key of keys) {
+                                const raw = toolInput[key];
+                                let val: string;
+                                if (raw === null || raw === undefined) {
+                                    val = '`null`';
+                                } else if (typeof raw === 'string') {
+                                    val = raw || '*empty*';
+                                } else if (typeof raw === 'boolean' || typeof raw === 'number') {
+                                    val = `\`${String(raw)}\``;
+                                } else {
+                                    // Arrays/objects → compact JSON in code block
+                                    const json = JSON.stringify(raw, null, 2);
+                                    val = `\`\`\`json\n${truncateCodePoints(json, 800)}\n\`\`\``;
+                                }
+                                // Discord embed field value max is 1024 chars
+                                val = truncateCodePoints(val, 1024);
+                                // Short primitive values can be inline
+                                const inline = val.length <= 40 && !val.includes('\n');
+                                fields.push({ name: key, value: val, inline });
+                            }
+                            embeds = [{
+                                color: 0x0099ff,
+                                title: `🔧 \`${displayName}\``,
+                                fields,
+                            }];
+                        }
                     }
 
                     const discordMsgId = await sendEmbed(threadId, embeds);
@@ -280,7 +306,7 @@ export function createClaudeSender(threadId: string) {
                     // Filter out system reminder content
                     let cleanContent = msg.content;
                     cleanContent = cleanContent.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
-                    cleanContent = cleanContent.replace(/\n\s*\n\s*\n/g, '\n\n').trim();
+                    cleanContent = cleanContent.replace(/\n\s*\n\s*\n/g, '\n\n');
 
                     const toolUseId = meta<string | undefined>(msg.metadata, 'toolUseId', undefined);
                     const tracked = toolUseId ? toolUseMessages.get(toolUseId) : undefined;

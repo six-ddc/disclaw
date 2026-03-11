@@ -254,8 +254,7 @@ function scheduleUpdate(state: LivePagerState): void {
 function cleanContent(text: string): string {
     return text
         .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-        .replace(/\n\s*\n\s*\n/g, '\n\n')
-        .trim();
+        .replace(/\n\s*\n\s*\n/g, '\n\n');
 }
 
 /** Parse all displayable pages from raw session messages */
@@ -599,6 +598,33 @@ async function findLastRoundBounds(sessionId: string, dir?: string): Promise<{ o
     } catch (e) {
         log.warn(`findLastRoundBounds failed: ${e}`);
         return { offset: 0, limit: 0 };
+    }
+}
+
+/**
+ * Hide pager navigation buttons on a finalized pager message (triggered by reaction removal).
+ * Returns true if buttons were hidden, false if message not found or not a pager.
+ */
+export async function hidePagerButtons(messageId: string): Promise<boolean> {
+    const pagerData = getPagerMessage(messageId);
+    if (!pagerData) return false;
+
+    try {
+        const result = await renderPersistentPage(
+            pagerData.session_id, Infinity,
+            pagerData.msg_offset, pagerData.msg_limit,
+            pagerData.working_dir || undefined,
+        );
+        if (!result) return false;
+
+        await editRichMessage(pagerData.thread_id, messageId, {
+            embeds: [result.embed],
+            components: [],
+        });
+        return true;
+    } catch (e) {
+        log.error(`Failed to hide pager buttons: ${e}`);
+        return false;
     }
 }
 

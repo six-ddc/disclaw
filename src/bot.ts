@@ -24,19 +24,19 @@ import { db, getChannelConfigCached, getThreadMapping } from './db.js';
 import { truncateCodePoints, initDiscord, addReaction } from './discord.js';
 import {
     handleCd,
+    handleCdAutocomplete,
     handleClear,
     handleInterrupt,
-    handleModel,
+    handleConfig,
+    handleConfigSubmit,
     handleFork,
     handleResume,
     handleCron,
-    handlePermission,
-    handleDisplay,
     validateWorkingDir,
 } from './interactions.js';
 import { handleDirPickInteraction } from './dir-picker.js';
 import { handleHistoryInteraction } from './history.js';
-import { handlePagerInteraction, restorePagerButtons } from './tool-pager.js';
+import { handlePagerInteraction, hidePagerButtons, restorePagerButtons } from './tool-pager.js';
 import { initCronScheduler, createCronMcpServer, getCronScheduler } from './cron.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
@@ -109,6 +109,11 @@ client.once(Events.ClientReady, async (c) => {
         .addSubcommand(sub =>
             sub.setName('cd')
                .setDescription('Change working directory (channel default or thread override)')
+               .addStringOption(opt =>
+                   opt.setName('path')
+                      .setDescription('Directory path (leave empty for interactive picker)')
+                      .setAutocomplete(true)
+               )
         )
         .addSubcommand(sub =>
             sub.setName('clear')
@@ -119,8 +124,8 @@ client.once(Events.ClientReady, async (c) => {
                .setDescription('Interrupt the current Claude processing')
         )
         .addSubcommand(sub =>
-            sub.setName('model')
-               .setDescription('Switch Claude model for this thread')
+            sub.setName('config')
+               .setDescription('Configure model, permission, and display mode for this thread')
         )
         .addSubcommand(sub =>
             sub.setName('fork')
@@ -134,14 +139,7 @@ client.once(Events.ClientReady, async (c) => {
             sub.setName('cron')
                .setDescription('List scheduled tasks')
         )
-        .addSubcommand(sub =>
-            sub.setName('permission')
-               .setDescription('Set permission mode for this thread')
-        )
-        .addSubcommand(sub =>
-            sub.setName('display')
-               .setDescription('Set tool display mode for this thread')
-        );
+;
 
     await c.application?.commands.create(command);
     log('Slash commands registered');
@@ -151,6 +149,15 @@ client.once(Events.ClientReady, async (c) => {
 
 // Handle slash command and button interactions
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+    // Handle autocomplete
+    if (interaction.isAutocomplete() && interaction.commandName === 'disclaw') {
+        const subcommand = interaction.options.getSubcommand();
+        if (subcommand === 'cd') {
+            await handleCdAutocomplete(interaction);
+        }
+        return;
+    }
+
     // Handle /disclaw slash commands
     if (interaction.isChatInputCommand() && interaction.commandName === 'disclaw') {
         const subcommand = interaction.options.getSubcommand();
@@ -161,19 +168,21 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
             await handleClear(interaction);
         } else if (subcommand === 'interrupt') {
             await handleInterrupt(interaction);
-        } else if (subcommand === 'model') {
-            await handleModel(interaction);
+        } else if (subcommand === 'config') {
+            await handleConfig(interaction);
         } else if (subcommand === 'fork') {
             await handleFork(interaction, client);
         } else if (subcommand === 'resume') {
             await handleResume(interaction);
         } else if (subcommand === 'cron') {
             await handleCron(interaction);
-        } else if (subcommand === 'permission') {
-            await handlePermission(interaction);
-        } else if (subcommand === 'display') {
-            await handleDisplay(interaction);
         }
+        return;
+    }
+
+    // Handle config modal submit
+    if (interaction.isModalSubmit() && interaction.customId === 'disclaw_config_modal') {
+        await handleConfigSubmit(interaction);
         return;
     }
 
@@ -218,6 +227,32 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
         }
     } catch (e) {
         log.error(`Failed to restore pager on reaction: ${e}`);
+    }
+});
+
+// Handle reaction removal — hide pager buttons when all user reactions are removed
+client.on(Events.MessageReactionRemove, async (reaction, user) => {
+    try {
+        if (user.id === client.user?.id) return;
+
+        const message = reaction.message.partial
+            ? await reaction.message.fetch()
+            : reaction.message;
+
+        if (message.author?.id !== client.user?.id) return;
+
+        // Check if any non-bot reactions remain
+        const hasUserReactions = message.reactions.cache.some(r =>
+            r.count > (r.me ? 1 : 0)
+        );
+        if (hasUserReactions) return;
+
+        const hidden = await hidePagerButtons(message.id);
+        if (hidden) {
+            log(`Pager buttons hidden via reaction removal on message=${message.id}`);
+        }
+    } catch (e) {
+        log.error(`Failed to hide pager on reaction removal: ${e}`);
     }
 });
 

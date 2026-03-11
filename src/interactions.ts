@@ -11,13 +11,17 @@ import {
     StringSelectMenuBuilder,
     ActionRowBuilder,
     ComponentType,
+    ModalBuilder,
+    LabelBuilder,
     MessageFlags,
+    type AutocompleteInteraction,
     type ChatInputCommandInteraction,
     type StringSelectMenuInteraction,
+    type ModalSubmitInteraction,
     type Client,
 } from 'discord.js';
-import { existsSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, readdirSync, statSync } from 'fs';
+import { resolve, dirname, basename } from 'path';
 import { runner } from './runner.js';
 import {
     db,
@@ -96,9 +100,76 @@ function requireThreadSession(interaction: ChatInputCommandInteraction) {
 // COMMAND HANDLERS
 // =========================================================================
 
+/** Resolve the base working directory for the current context. */
+function resolveBaseDir(interaction: ChatInputCommandInteraction | AutocompleteInteraction): string {
+    const isThread = interaction.channel?.isThread();
+    if (isThread) {
+        const mapping = getThreadMapping(interaction.channel!.id);
+        const parentId = interaction.channel!.parentId || '';
+        return mapping?.working_dir ||
+            getChannelConfigCached(parentId)?.working_dir ||
+            process.env.CLAUDE_WORKING_DIR || process.cwd();
+    }
+    const config = getChannelConfigCached(interaction.channelId);
+    return config?.working_dir || process.env.CLAUDE_WORKING_DIR || process.cwd();
+}
+
+/** List subdirectories matching a partial input for autocomplete. */
+function listDirCompletions(input: string, baseDir: string): { name: string; value: string }[] {
+    try {
+        // Resolve input relative to baseDir
+        const inputPath = input ? resolve(baseDir, input) : baseDir;
+
+        // Determine the directory to list and the prefix to filter
+        let dirToList: string;
+        let prefix: string;
+        if (existsSync(inputPath) && statSync(inputPath).isDirectory()) {
+            // Input is a complete directory — list its children
+            dirToList = inputPath;
+            prefix = '';
+        } else {
+            // Input is partial — list parent and filter by prefix
+            dirToList = dirname(inputPath);
+            prefix = basename(inputPath).toLowerCase();
+        }
+
+        if (!existsSync(dirToList)) return [];
+
+        const entries = readdirSync(dirToList, { withFileTypes: true });
+        const dirs = entries
+            .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+            .filter(e => !prefix || e.name.toLowerCase().startsWith(prefix))
+            .slice(0, 25)
+            .map(e => {
+                const full = resolve(dirToList, e.name);
+                return { name: full, value: full };
+            });
+
+        // If the input itself is a valid directory, include it at the top
+        if (existsSync(inputPath) && statSync(inputPath).isDirectory() && input) {
+            const resolved = resolve(inputPath);
+            dirs.unshift({ name: `${resolved} (select)`, value: resolved });
+            return dirs.slice(0, 25);
+        }
+
+        return dirs;
+    } catch {
+        return [];
+    }
+}
+
+export async function handleCdAutocomplete(interaction: AutocompleteInteraction) {
+    const focused = interaction.options.getFocused();
+    const baseDir = resolveBaseDir(interaction);
+    const choices = listDirCompletions(focused, baseDir);
+    await interaction.respond(choices);
+}
+
 export async function handleCd(interaction: ChatInputCommandInteraction) {
     const isThread = interaction.channel?.isThread();
     log(`/disclaw cd invoked by ${interaction.user.tag} in ${isThread ? 'thread' : 'channel'} ${interaction.channelId}`);
+
+    const pathOption = interaction.options.getString('path');
 
     // Thread context: require an active session
     if (isThread) {
@@ -110,10 +181,26 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
             return;
         }
 
+        if (pathOption) {
+            // Direct path from autocomplete
+            const selected = resolve(pathOption);
+            const validationError = validateWorkingDir(selected);
+            if (validationError) {
+                log.warn(`cd: validation failed for "${selected}" in thread ${threadId}: ${validationError}`);
+                await interaction.reply({ content: validationError, flags: MessageFlags.Ephemeral });
+                return;
+            }
+            updateThreadWorkingDir(threadId, selected);
+            updateThreadSession(threadId, null);
+            await interaction.reply({ content: `Working directory set to \`${selected}\``, flags: MessageFlags.Ephemeral });
+            log(`Thread ${threadId} working dir set to: ${selected} (session cleared)`);
+            return;
+        }
+
+        // No path — fall back to interactive dir picker
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        // Start dir: thread working_dir → channel config → env → cwd
-        const parentId = interaction.channel!.isThread() ? (interaction.channel!.parentId || '') : '';
+        const parentId = interaction.channel!.parentId || '';
         const startDir = mapping.working_dir ||
             getChannelConfigCached(parentId)?.working_dir ||
             process.env.CLAUDE_WORKING_DIR || process.cwd();
@@ -139,6 +226,20 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
     }
 
     // Channel context: set channel default
+    if (pathOption) {
+        const selected = resolve(pathOption);
+        const validationError = validateWorkingDir(selected);
+        if (validationError) {
+            log.warn(`cd: validation failed for "${selected}" in channel ${interaction.channelId}: ${validationError}`);
+            await interaction.reply({ content: validationError, flags: MessageFlags.Ephemeral });
+            return;
+        }
+        setChannelConfig(interaction.channelId, selected);
+        await interaction.reply({ content: `Channel working directory set to \`${selected}\``, flags: MessageFlags.Ephemeral });
+        log(`Channel ${interaction.channelId} configured with working dir: ${selected}`);
+        return;
+    }
+
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const currentConfig = getChannelConfigCached(interaction.channelId);
@@ -185,14 +286,14 @@ export async function handleInterrupt(interaction: ChatInputCommandInteraction) 
     log(`Interrupted job in thread ${ctx.threadId} by ${interaction.user.tag}`);
 }
 
-export async function handleModel(interaction: ChatInputCommandInteraction) {
-    log(`/disclaw model invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
+export async function handleConfig(interaction: ChatInputCommandInteraction) {
+    log(`/disclaw config invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     const ctx = requireThreadSession(interaction);
     if (!ctx) return;
 
     const models = runner.getModels();
     if (models.length === 0) {
-        log.warn(`model: model list not available yet for thread ${ctx.threadId}`);
+        log.warn(`config: model list not available yet for thread ${ctx.threadId}`);
         await interaction.reply({
             content: 'Model list not available yet. Send a message first, then try again.',
             flags: MessageFlags.Ephemeral,
@@ -200,44 +301,104 @@ export async function handleModel(interaction: ChatInputCommandInteraction) {
         return;
     }
 
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const currentModel = ctx.mapping.model || models[0]?.value || '';
+    const currentPermission = ctx.mapping.permission_mode || process.env.DISCLAW_PERMISSION_MODE || 'default';
+    const currentDisplay = ctx.mapping.display_mode || 'verbose';
 
-    log.debug(`model: presenting ${models.length} models (current=${ctx.mapping.model}) in thread ${ctx.threadId}`);
-    const select = new StringSelectMenuBuilder()
-        .setCustomId('disclaw_model_select')
+    log.debug(`config: current model=${currentModel} permission=${currentPermission} display=${currentDisplay} thread=${ctx.threadId}`);
+
+    const modelSelect = new StringSelectMenuBuilder()
+        .setCustomId('config_model')
         .setPlaceholder('Pick a model')
         .addOptions(
             models.slice(0, 25).map(m => ({
                 label: m.displayName,
                 value: m.value,
                 description: truncateCodePoints(m.description, 100),
-                default: m.value === ctx.mapping.model,
+                default: m.value === currentModel,
             }))
         );
 
-    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
-    const reply = await interaction.editReply({ content: 'Pick a model:', components: [row] });
+    const permissionSelect = new StringSelectMenuBuilder()
+        .setCustomId('config_permission')
+        .addOptions(
+            PERMISSION_MODES.map(m => ({
+                label: m.label,
+                value: m.value,
+                description: m.description,
+                default: m.value === currentPermission,
+            }))
+        );
 
-    let selected: StringSelectMenuInteraction;
-    try {
-        selected = await reply.awaitMessageComponent({
-            componentType: ComponentType.StringSelect,
-            time: 60_000,
-        }) as StringSelectMenuInteraction;
-    } catch {
-        log.debug(`model: selection timed out in thread ${ctx.threadId}`);
-        await interaction.editReply({ content: 'Selection timed out.', components: [] });
-        return;
+    const displaySelect = new StringSelectMenuBuilder()
+        .setCustomId('config_display')
+        .addOptions(
+            DISPLAY_MODES.map(m => ({
+                label: m.label,
+                value: m.value,
+                description: m.description,
+                default: m.value === currentDisplay,
+            }))
+        );
+
+    const modal = new ModalBuilder()
+        .setCustomId('disclaw_config_modal')
+        .setTitle('Thread Config')
+        .addLabelComponents(
+            new LabelBuilder().setLabel('Model').setStringSelectMenuComponent(modelSelect),
+            new LabelBuilder().setLabel('Permission Mode').setStringSelectMenuComponent(permissionSelect),
+            new LabelBuilder().setLabel('Display Mode').setStringSelectMenuComponent(displaySelect),
+        );
+
+    await interaction.showModal(modal);
+    log.debug(`config: modal shown for thread ${ctx.threadId}`);
+}
+
+export async function handleConfigSubmit(interaction: ModalSubmitInteraction) {
+    const threadId = interaction.channel?.isThread() ? interaction.channel.id : null;
+    if (!threadId) return;
+
+    const mapping = getThreadMapping(threadId);
+    if (!mapping) return;
+
+    log(`Config modal submitted by ${interaction.user.tag} in thread ${threadId}`);
+
+    const changes: string[] = [];
+
+    // Model
+    const modelValues = interaction.fields.getStringSelectValues('config_model');
+    if (modelValues.length > 0) {
+        const modelValue = modelValues[0]!;
+        updateThreadModel(threadId, modelValue);
+        const models = runner.getModels();
+        const modelInfo = models.find(m => m.value === modelValue);
+        changes.push(`Model → **${modelInfo?.displayName || modelValue}**`);
+        log(`Model set to ${modelValue} in thread ${threadId}`);
     }
 
-    const modelValue = selected.values[0]!;
-    const modelInfo = models.find(m => m.value === modelValue);
-    updateThreadModel(ctx.threadId, modelValue);
-    await selected.update({
-        content: `Model set to **${modelInfo?.displayName || modelValue}**.`,
-        components: [],
-    });
-    log(`Model set to ${modelValue} in thread ${ctx.threadId} by ${interaction.user.tag}`);
+    // Permission
+    const permValues = interaction.fields.getStringSelectValues('config_permission');
+    if (permValues.length > 0) {
+        const modeValue = permValues[0]!;
+        const envDefault = process.env.DISCLAW_PERMISSION_MODE || 'default';
+        updateThreadPermissionMode(threadId, modeValue === envDefault ? null : modeValue);
+        const modeInfo = PERMISSION_MODES.find(m => m.value === modeValue);
+        changes.push(`Permission → **${modeInfo?.label || modeValue}**`);
+        log(`Permission mode set to ${modeValue} in thread ${threadId}`);
+    }
+
+    // Display
+    const displayValues = interaction.fields.getStringSelectValues('config_display');
+    if (displayValues.length > 0) {
+        const modeValue = displayValues[0]!;
+        updateThreadDisplayMode(threadId, modeValue === 'verbose' ? null : modeValue);
+        const modeInfo = DISPLAY_MODES.find(m => m.value === modeValue);
+        changes.push(`Display → **${modeInfo?.label || modeValue}**`);
+        log(`Display mode set to ${modeValue} in thread ${threadId}`);
+    }
+
+    const summary = changes.length > 0 ? changes.join('\n') : 'No changes.';
+    await interaction.reply({ content: summary, flags: MessageFlags.Ephemeral });
 }
 
 export async function handleFork(interaction: ChatInputCommandInteraction, client: Client) {
@@ -444,116 +605,9 @@ const PERMISSION_MODES = [
     { value: 'plan', label: 'Plan', description: 'No tool execution; Claude plans without making changes' },
 ] as const;
 
-export async function handlePermission(interaction: ChatInputCommandInteraction) {
-    log(`/disclaw permission invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
-    const ctx = requireThreadSession(interaction);
-    if (!ctx) return;
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    const currentMode = ctx.mapping.permission_mode || process.env.DISCLAW_PERMISSION_MODE || 'default';
-    log.debug(`permission: current mode=${currentMode} in thread ${ctx.threadId}`);
-
-    const select = new StringSelectMenuBuilder()
-        .setCustomId('disclaw_permission_select')
-        .setPlaceholder('Select permission mode')
-        .addOptions(
-            PERMISSION_MODES.map(m => ({
-                label: m.label,
-                value: m.value,
-                description: truncateCodePoints(m.description, 100),
-                default: m.value === currentMode,
-            }))
-        );
-
-    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
-    const reply = await interaction.editReply({
-        content: `Current mode: **${PERMISSION_MODES.find(m => m.value === currentMode)?.label || currentMode}**\nSelect a new permission mode:`,
-        components: [row],
-    });
-
-    let selected: StringSelectMenuInteraction;
-    try {
-        selected = await reply.awaitMessageComponent({
-            componentType: ComponentType.StringSelect,
-            time: 60_000,
-        }) as StringSelectMenuInteraction;
-    } catch {
-        log.debug(`permission: selection timed out in thread ${ctx.threadId}`);
-        await interaction.editReply({ content: 'Selection timed out.', components: [] });
-        return;
-    }
-
-    const modeValue = selected.values[0]!;
-    const modeInfo = PERMISSION_MODES.find(m => m.value === modeValue);
-
-    // Store null if it matches the env default (so env can be changed without DB override)
-    const envDefault = process.env.DISCLAW_PERMISSION_MODE || 'default';
-    updateThreadPermissionMode(ctx.threadId, modeValue === envDefault ? null : modeValue);
-
-    await selected.update({
-        content: `Permission mode set to **${modeInfo?.label || modeValue}**: ${modeInfo?.description || ''}`,
-        components: [],
-    });
-    log(`Permission mode set to ${modeValue} in thread ${ctx.threadId} by ${interaction.user.tag}`);
-}
-
 /** Display mode definitions */
 const DISPLAY_MODES = [
     { value: 'verbose', label: 'Verbose', description: 'Show all tool messages as they arrive' },
     { value: 'simple', label: 'Simple', description: 'Hide tool and thinking messages, show only final reply' },
     { value: 'pager', label: 'Pager', description: 'Tool calls in a single navigable embed with page buttons' },
 ] as const;
-
-export async function handleDisplay(interaction: ChatInputCommandInteraction) {
-    log(`/disclaw display invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
-    const ctx = requireThreadSession(interaction);
-    if (!ctx) return;
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    const currentMode = ctx.mapping.display_mode || 'verbose';
-    log.debug(`display: current mode=${currentMode} in thread ${ctx.threadId}`);
-
-    const select = new StringSelectMenuBuilder()
-        .setCustomId('disclaw_display_select')
-        .setPlaceholder('Select display mode')
-        .addOptions(
-            DISPLAY_MODES.map(m => ({
-                label: m.label,
-                value: m.value,
-                description: truncateCodePoints(m.description, 100),
-                default: m.value === currentMode,
-            }))
-        );
-
-    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
-    const reply = await interaction.editReply({
-        content: `Current mode: **${DISPLAY_MODES.find(m => m.value === currentMode)?.label || currentMode}**\nSelect a display mode:`,
-        components: [row],
-    });
-
-    let selected: StringSelectMenuInteraction;
-    try {
-        selected = await reply.awaitMessageComponent({
-            componentType: ComponentType.StringSelect,
-            time: 60_000,
-        }) as StringSelectMenuInteraction;
-    } catch {
-        log.debug(`display: selection timed out in thread ${ctx.threadId}`);
-        await interaction.editReply({ content: 'Selection timed out.', components: [] });
-        return;
-    }
-
-    const modeValue = selected.values[0]!;
-    const modeInfo = DISPLAY_MODES.find(m => m.value === modeValue);
-
-    // Store null for default (verbose) so it can be overridden
-    updateThreadDisplayMode(ctx.threadId, modeValue === 'verbose' ? null : modeValue);
-
-    await selected.update({
-        content: `Display mode set to **${modeInfo?.label || modeValue}**: ${modeInfo?.description || ''}`,
-        components: [],
-    });
-    log(`Display mode set to ${modeValue} in thread ${ctx.threadId} by ${interaction.user.tag}`);
-}
