@@ -36,8 +36,9 @@ import {
 } from './db.js';
 import { sendEmbed, renameThread, truncateCodePoints } from './discord.js';
 import { sendCronControlPanel } from './cron-buttons.js';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[cron] ${msg}\n`);
+const log = createLogger('cron');
 
 const TIMEZONE = process.env.TZ;
 const MAX_FAILURES = 3;

@@ -6,6 +6,7 @@
  */
 
 import type { Message, Attachment } from 'discord.js';
+import { createLogger } from './logger.js';
 
 // --- Types ---
 
@@ -41,7 +42,7 @@ const TEXT_EXTENSIONS = new Set([
     'env', 'gitignore', 'editorconfig', 'eslintrc', 'prettierrc',
 ]);
 
-const log = (msg: string) => process.stdout.write(`[attachment] ${msg}\n`);
+const log = createLogger('attachment');
 
 // --- Helpers ---
 

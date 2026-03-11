@@ -20,7 +20,7 @@ import { homedir } from 'os';
 import { resolve } from 'path';
 import { runner } from './runner.js';
 import { db, getChannelConfigCached, getThreadMapping } from './db.js';
-import { truncateCodePoints, initDiscord } from './discord.js';
+import { truncateCodePoints, initDiscord, addReaction } from './discord.js';
 import {
     handleCd,
     handleClear,
@@ -30,17 +30,19 @@ import {
     handleResume,
     handleCron,
     handlePermission,
+    handleDisplay,
     validateWorkingDir,
 } from './interactions.js';
 import { handleDirPickInteraction } from './dir-picker.js';
 import { handleHistoryInteraction } from './history.js';
+import { handlePagerInteraction } from './tool-pager.js';
 import { initCronScheduler, createCronMcpServer, getCronScheduler } from './cron.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
 import { extractMessageContent } from './attachment-handler.js';
+import { createLogger } from './logger.js';
 
-// Force unbuffered logging
-const log = (msg: string) => process.stdout.write(`[bot] ${msg}\n`);
+const log = createLogger('bot');
 
 // Helper function to resolve working directory from message or channel config
 function resolveWorkingDir(message: string, channelId: string): { workingDir: string; cleanedMessage: string; error?: string } {
@@ -126,6 +128,10 @@ client.once(Events.ClientReady, async (c) => {
         .addSubcommand(sub =>
             sub.setName('permission')
                .setDescription('Set permission mode for this thread')
+        )
+        .addSubcommand(sub =>
+            sub.setName('display')
+               .setDescription('Set tool display mode for this thread')
         );
 
     await c.application?.commands.create(command);
@@ -154,6 +160,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
             await handleCron(interaction);
         } else if (subcommand === 'permission') {
             await handlePermission(interaction);
+        } else if (subcommand === 'display') {
+            await handleDisplay(interaction);
         }
         return;
     }
@@ -169,6 +177,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         if (await handleDirPickInteraction(interaction)) return;
         // History pagination buttons
         if (await handleHistoryInteraction(interaction)) return;
+        // Tool pager navigation buttons
+        if (await handlePagerInteraction(interaction)) return;
 
         // Unknown button
         await interaction.reply({ content: 'This button has expired.', flags: MessageFlags.Ephemeral });
@@ -198,6 +208,9 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
         log(`Thread message from ${message.author.tag}`);
 
+        // React with eyes to acknowledge receipt
+        addReaction(thread.id, message.id, '👀').catch(() => {});
+
         // Show typing indicator
         await thread.sendTyping();
 
@@ -225,6 +238,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             parentChannelId: parentId || undefined,
             statusMessageId: thread.id,
             sourceMessageId: message.id,
+            eyesReaction: { channelId: thread.id, messageId: message.id },
             createMcpServers: parentId
                 ? () => ({ 'disclaw': createCronMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
                 : undefined,
@@ -239,6 +253,9 @@ client.on(Events.MessageCreate, async (message: Message) => {
     if (!isMentioned) return;
 
     log(`New mention from ${message.author.tag}`);
+
+    // React with eyes to acknowledge receipt
+    addReaction(message.channelId, message.id, '👀').catch(() => {});
 
     // Extract message content and resolve working directory
     const rawText = message.content.replace(/<@!?\d+>/g, '').trim();
@@ -299,6 +316,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         workingDir,
         parentChannelId: message.channelId,
         statusMessageId: statusMessage.id,
+        eyesReaction: { channelId: message.channelId, messageId: message.id },
         createMcpServers: () => ({ 'disclaw': createCronMcpServer(message.channelId, message.author.id, workingDir, undefined, thread.id) }),
     });
 });

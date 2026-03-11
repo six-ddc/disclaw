@@ -6,8 +6,9 @@
  */
 
 import type { Client, TextChannel } from 'discord.js';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[discord] ${msg}\n`);
+const log = createLogger('discord');
 
 let client: Client | null = null;
 
@@ -296,9 +297,11 @@ export interface EmbedData {
  * Splits long messages using markdown-aware chunking to preserve code blocks.
  */
 export async function sendToThread(threadId: string, content: string): Promise<void> {
+    if (!content.trim()) return; // Skip empty messages (Discord rejects them)
     const channel = await getChannel(threadId);
     const chunks = splitMarkdown(content, 2000);
     for (const chunk of chunks) {
+        if (!chunk.trim()) continue;
         await channel.send(suppressLinkPreviews ? wrapUrls(chunk) : chunk);
     }
 }

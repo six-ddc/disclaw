@@ -27,6 +27,7 @@ import {
     updateThreadSession,
     updateThreadModel,
     updateThreadPermissionMode,
+    updateThreadDisplayMode,
     updateThreadWorkingDir,
     listCronJobs,
     cronJobDisplayName,
@@ -35,8 +36,9 @@ import { truncateCodePoints, sendToThread, sendEmbed } from './discord.js';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { startDirPicker } from './dir-picker.js';
 import { sendHistory } from './history.js';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[interactions] ${msg}\n`);
+const log = createLogger('interactions');
 
 // Allowed working directories (configurable via env, comma-separated)
 const ALLOWED_DIRS = process.env.DISCLAW_ALLOWED_DIRS
@@ -451,4 +453,61 @@ export async function handlePermission(interaction: ChatInputCommandInteraction)
         components: [],
     });
     log(`Permission mode set to ${modeValue} in thread ${ctx.threadId}`);
+}
+
+/** Display mode definitions */
+const DISPLAY_MODES = [
+    { value: 'verbose', label: 'Verbose', description: 'Show all tool messages as they arrive' },
+    { value: 'simple', label: 'Simple', description: 'Hide tool and thinking messages, show only final reply' },
+    { value: 'pager', label: 'Pager', description: 'Tool calls in a single navigable embed with page buttons' },
+] as const;
+
+export async function handleDisplay(interaction: ChatInputCommandInteraction) {
+    const ctx = requireThreadSession(interaction);
+    if (!ctx) return;
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const currentMode = ctx.mapping.display_mode || 'verbose';
+
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('disclaw_display_select')
+        .setPlaceholder('Select display mode')
+        .addOptions(
+            DISPLAY_MODES.map(m => ({
+                label: m.label,
+                value: m.value,
+                description: truncateCodePoints(m.description, 100),
+                default: m.value === currentMode,
+            }))
+        );
+
+    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+    const reply = await interaction.editReply({
+        content: `Current mode: **${DISPLAY_MODES.find(m => m.value === currentMode)?.label || currentMode}**\nSelect a display mode:`,
+        components: [row],
+    });
+
+    let selected: StringSelectMenuInteraction;
+    try {
+        selected = await reply.awaitMessageComponent({
+            componentType: ComponentType.StringSelect,
+            time: 60_000,
+        }) as StringSelectMenuInteraction;
+    } catch {
+        await interaction.editReply({ content: 'Selection timed out.', components: [] });
+        return;
+    }
+
+    const modeValue = selected.values[0]!;
+    const modeInfo = DISPLAY_MODES.find(m => m.value === modeValue);
+
+    // Store null for default (verbose) so it can be overridden
+    updateThreadDisplayMode(ctx.threadId, modeValue === 'verbose' ? null : modeValue);
+
+    await selected.update({
+        content: `Display mode set to **${modeInfo?.label || modeValue}**: ${modeInfo?.description || ''}`,
+        components: [],
+    });
+    log(`Display mode set to ${modeValue} in thread ${ctx.threadId}`);
 }

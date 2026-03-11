@@ -7,10 +7,11 @@
 
 import { query, type SDKMessage, type Query, type SDKResultMessage, type McpServerConfig, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MultimodalPrompt } from './attachment-handler.js';
+import { createLogger } from './logger.js';
 
 const TIMEZONE = process.env.TZ;
 
-const log = (msg: string) => process.stdout.write(`[claude-client] ${msg}\n`);
+const log = createLogger('claude-client');
 
 /** Get current datetime for system prompt injection */
 function getDatetimeContext(): string {

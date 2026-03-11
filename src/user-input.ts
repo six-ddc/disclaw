@@ -20,8 +20,9 @@ import {
 } from 'discord.js';
 import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import type { PermissionResult, CanUseTool, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[user-input] ${msg}\n`);
+const log = createLogger('user-input');
 
 const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 

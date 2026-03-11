@@ -15,8 +15,9 @@ import {
 import { getCronJob, setCronJobVerbose, cronJobDisplayName, type CronJob } from './db.js';
 import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import { getCronScheduler } from './cron.js';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[cron-buttons] ${msg}\n`);
+const log = createLogger('cron-buttons');
 
 const TIMEZONE = process.env.TZ;
 

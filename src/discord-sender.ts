@@ -7,8 +7,9 @@
 
 import type { ClaudeMessage } from './message-converter.js';
 import { sendEmbed, editEmbed, sendToThread, truncateCodePoints, type EmbedData } from './discord.js';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[discord-sender] ${msg}\n`);
+const log = createLogger('discord-sender');
 
 /** Safely access a metadata field with a typed default */
 function meta<T>(m: Record<string, unknown> | undefined, key: string, fallback: T): T {
@@ -472,7 +473,8 @@ export function createClaudeSender(threadId: string) {
                 }
             }
             } catch (err) {
-                log(`Failed to send ${msg.type} message: ${err}`);
+                const preview = msg.content?.slice(0, 80) || JSON.stringify(msg.metadata)?.slice(0, 80) || '';
+                log(`Failed to send ${msg.type} to ${threadId}: ${err} | preview: ${preview}`);
             }
         }
     };

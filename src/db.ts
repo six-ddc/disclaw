@@ -10,8 +10,9 @@
  */
 
 import { Database } from 'bun:sqlite';
+import { createLogger } from './logger.js';
 
-const log = (msg: string) => process.stdout.write(`[db] ${msg}\n`);
+const log = createLogger('db');
 const DB_PATH = process.env.DB_PATH || './data/threads.db';
 
 // Ensure data directory exists
@@ -66,6 +67,11 @@ try {
 // Add permission_mode column to threads table (migration)
 try {
     db.run(`ALTER TABLE threads ADD COLUMN permission_mode TEXT`);
+} catch {} // Column may already exist
+
+// Add display_mode column to threads table (migration)
+try {
+    db.run(`ALTER TABLE threads ADD COLUMN display_mode TEXT`);
 } catch {} // Column may already exist
 
 // Create index for faster lookups
@@ -135,10 +141,11 @@ export interface ThreadMapping {
     model: string | null;
     fork_from: string | null;
     permission_mode: string | null;
+    display_mode: string | null;
 }
 
 export function getThreadMapping(threadId: string): ThreadMapping | null {
-    return db.query('SELECT session_id, working_dir, model, fork_from, permission_mode FROM threads WHERE thread_id = ?')
+    return db.query('SELECT session_id, working_dir, model, fork_from, permission_mode, display_mode FROM threads WHERE thread_id = ?')
         .get(threadId) as ThreadMapping | null;
 }
 
@@ -152,6 +159,10 @@ export function updateThreadModel(threadId: string, model: string): void {
 
 export function updateThreadPermissionMode(threadId: string, mode: string | null): void {
     db.run('UPDATE threads SET permission_mode = ? WHERE thread_id = ?', [mode, threadId]);
+}
+
+export function updateThreadDisplayMode(threadId: string, mode: string | null): void {
+    db.run('UPDATE threads SET display_mode = ? WHERE thread_id = ?', [mode, threadId]);
 }
 
 export function updateThreadWorkingDir(threadId: string, workingDir: string): void {

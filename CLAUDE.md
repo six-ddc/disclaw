@@ -69,6 +69,10 @@ There are no tests or linting configured.
 - **TypeScript:** Strict mode with `noUncheckedIndexedAccess` and `noImplicitOverride` enabled; `noEmit: true` (type checking only)
 - **Key dependencies:** discord.js, @anthropic-ai/claude-agent-sdk, croner (cron scheduling)
 
+## Logging
+
+Uses `pino` (`src/logger.ts`). Output goes to both console and `logs/YYYY-MM-DD.log` (JSON). discord.js has built-in rate limit retry — do not add custom retry wrappers on top.
+
 ## Environment Variables
 
 Required: `DISCORD_BOT_TOKEN`. Optional: `CLAUDE_WORKING_DIR`, `DISCLAW_ALLOWED_DIRS` (comma-separated security allowlist), `DB_PATH` (default: `./data/threads.db`), `DISCLAW_PERMISSION_MODE` (default: `default`; options: `default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`), `TZ`. See `.env.example`.

@@ -13,6 +13,10 @@ import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/
 import { getThreadMapping, resolveSessionState, updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
 import { createCanUseTool, cleanupThread } from './user-input.js';
 import type { MultimodalPrompt } from './attachment-handler.js';
+import { createToolPager } from './tool-pager.js';
+import { createLogger } from './logger.js';
+
+export type DisplayMode = 'verbose' | 'simple' | 'pager';
 
 export interface ClaudeJob {
     prompt: string | MultimodalPrompt;
@@ -40,6 +44,8 @@ export interface ClaudeJob {
     permissionMode?: string;
     /** The Discord message ID that triggered this job (for queue indicator reactions) */
     sourceMessageId?: string;
+    /** Channel+message where 👀 reaction was placed (for removal on completion) */
+    eyesReaction?: { channelId: string; messageId: string };
     /** Called when the job completes (success or final failure) */
     onComplete?: (error?: Error) => void;
 }
@@ -50,7 +56,7 @@ interface RunnerOptions {
     backoffBaseMs?: number;
 }
 
-const log = (msg: string) => process.stdout.write(`[runner] ${msg}\n`);
+const log = createLogger('runner');
 
 class JobRunner {
     private active = 0;
@@ -152,7 +158,11 @@ class JobRunner {
         log(`Session: ${job.sessionId || '(auto)'}, Resume: ${job.resume}`);
 
         const sender = createClaudeSender(job.threadId);
-        const verbose = job.verbose !== false; // default true
+        // Resolve display mode: job-level > DB mapping > cron verbose compat > default
+        const mapping = getThreadMapping(job.threadId);
+        const displayMode: DisplayMode = job.verbose === false ? 'simple'
+            : (mapping?.display_mode as DisplayMode) || 'verbose';
+        const pager = displayMode === 'pager' ? createToolPager(job.threadId) : null;
         let lastResultText = '';
 
         const canUseTool = createCanUseTool(job.threadId);
@@ -181,7 +191,8 @@ class JobRunner {
                     }
                 },
                 onMessage: async (sdkMessage) => {
-                    // Capture the final result text for status message update
+                    try {
+                        // Capture the final result text for status message update
                     if (sdkMessage.type === 'result' && sdkMessage.subtype === 'success') {
                         lastResultText = sdkMessage.result;
                     }
@@ -211,31 +222,51 @@ class JobRunner {
                         }
                     }
 
-                    if (verbose) {
+                    if (displayMode === 'verbose') {
                         // Verbose: stream all messages as they arrive
                         const messages = convertToClaudeMessages(sdkMessage);
                         if (messages.length > 0) {
                             await sender(messages);
                         }
-                    } else {
-                        // Quiet: only send the final result text and completion stats
+                    } else if (displayMode === 'simple') {
+                        // Simple: only send final result text and system messages (completion stats)
+                        // Hide tool_use, tool_result, tool_progress, tool_summary, thinking
                         if (sdkMessage.type === 'result') {
                             if (sdkMessage.subtype === 'success' && sdkMessage.result) {
                                 await sender([{ type: 'text', content: sdkMessage.result }]);
                             }
-                            // Always send completion stats
                             const messages = convertToClaudeMessages(sdkMessage);
                             const systemMessages = messages.filter(m => m.type === 'system');
                             if (systemMessages.length > 0) {
                                 await sender(systemMessages);
                             }
                         }
+                    } else if (displayMode === 'pager') {
+                        // Track raw user/assistant messages for offset calculation in phase 2
+                        pager!.trackRawMessage(sdkMessage);
+                        const messages = convertToClaudeMessages(sdkMessage);
+                        for (const msg of messages) {
+                            if (msg.type === 'system') {
+                                await sender([msg]);
+                            } else {
+                                pager!.handleMessage(msg);
+                            }
+                        }
+                    }
+                    } catch (err) {
+                        log(`onMessage error (non-fatal): ${err}`);
                     }
                 },
             });
 
             this.activeQueries.delete(job.threadId);
             cleanupThread(job.threadId);
+            // Remove eyes reaction now that processing is done
+            if (job.eyesReaction) {
+                removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
+            }
+            // Finalize pager: switch to persistent SDK-backed buttons (async, non-blocking)
+            pager?.destroy(resultSessionId, job.workingDir || process.cwd());
 
             // If session ID changed (e.g. fork), update DB mapping
             // Skip when no sessionId was provided (e.g. cron jobs with persistSession: false)
@@ -265,6 +296,11 @@ class JobRunner {
         } catch (error) {
             this.activeQueries.delete(job.threadId);
             cleanupThread(job.threadId);
+            // Remove eyes reaction on error too
+            if (job.eyesReaction) {
+                removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
+            }
+            pager?.destroy(job.sessionId || '', job.workingDir || process.cwd());
 
             // Update status message to error state
             if (job.statusMessageId && job.parentChannelId) {

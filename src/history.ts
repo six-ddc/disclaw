@@ -8,11 +8,12 @@
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type InteractionUpdateOptions, type MessagePayload } from 'discord.js';
 import { truncateCodePoints, sendRichMessage, editRichMessage } from './discord.js';
+import { createLogger } from './logger.js';
 
 const MESSAGES_PER_PAGE = 6;
 const TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-const log = (msg: string) => process.stdout.write(`[history] ${msg}\n`);
+const log = createLogger('history');
 
 interface HistoryEntry {
     role: 'user' | 'assistant';
