@@ -6,10 +6,17 @@
  */
 
 import type { ClaudeMessage } from './message-converter.js';
-import { sendEmbed, editEmbed, sendToThread, truncateCodePoints, type EmbedData } from './discord.js';
+import { sendEmbed, editEmbed, sendToThread, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('discord-sender');
+
+/** Escape triple backticks inside content that will be wrapped in a code block.
+ *  Inserts a zero-width space to break the sequence so Discord's parser won't
+ *  prematurely close the fence. Invisible to readers. */
+function escapeCodeBlock(text: string): string {
+    return text.replaceAll('```', '\u02CB\u02CB\u02CB');
+}
 
 /** Safely access a metadata field with a typed default */
 function meta<T>(m: Record<string, unknown> | undefined, key: string, fallback: T): T {
@@ -146,6 +153,24 @@ function getFileTypeInfo(filePath: string): { icon: string; language: string } {
  * Returns an async function that converts ClaudeMessage[] into Discord embeds
  * and sends them to the given thread.
  */
+// Track last status message per thread for delete-on-replace + auto-delete
+const lastStatusMessage = new Map<string, { messageId: string; timer: ReturnType<typeof setTimeout> }>();
+
+function scheduleStatusDelete(threadId: string, messageId: string) {
+    // Delete previous status message immediately
+    const prev = lastStatusMessage.get(threadId);
+    if (prev) {
+        clearTimeout(prev.timer);
+        deleteMessage(threadId, prev.messageId).catch(() => {});
+    }
+    // Auto-delete this one after 1 minute
+    const timer = setTimeout(() => {
+        lastStatusMessage.delete(threadId);
+        deleteMessage(threadId, messageId).catch(() => {});
+    }, 60_000);
+    lastStatusMessage.set(threadId, { messageId, timer });
+}
+
 export function createClaudeSender(threadId: string) {
     // Map toolUseId → { discordMessageId, embeds } for correlating tool_result with tool_use
     const toolUseMessages = new Map<string, { messageId: string; embeds: EmbedData[] }>();
@@ -241,12 +266,12 @@ export function createClaudeSender(threadId: string) {
 
                         if (oldString) {
                             const { preview: oldPreview } = truncateContent(oldString, 3, 150);
-                            fields.push({ name: '🔴 Replacing', value: `\`\`\`${lang}\n${oldPreview}\n\`\`\``, inline: false });
+                            fields.push({ name: '🔴 Replacing', value: `\`\`\`${lang}\n${escapeCodeBlock(oldPreview)}\n\`\`\``, inline: false });
                         }
 
                         if (newString) {
                             const { preview: newPreview } = truncateContent(newString, 3, 150);
-                            fields.push({ name: '🟢 With', value: `\`\`\`${lang}\n${newPreview}\n\`\`\``, inline: false });
+                            fields.push({ name: '🟢 With', value: `\`\`\`${lang}\n${escapeCodeBlock(newPreview)}\n\`\`\``, inline: false });
                         }
 
                         embeds = [{
@@ -273,9 +298,8 @@ export function createClaudeSender(threadId: string) {
                                 } else if (typeof raw === 'boolean' || typeof raw === 'number') {
                                     val = `\`${String(raw)}\``;
                                 } else {
-                                    // Arrays/objects → compact JSON in code block
-                                    const json = JSON.stringify(raw, null, 2);
-                                    val = `\`\`\`json\n${truncateCodePoints(json, 800)}\n\`\`\``;
+                                    // Arrays/objects → plain JSON text
+                                    val = JSON.stringify(raw, null, 2);
                                 }
                                 // Discord embed field value max is 1024 chars
                                 val = truncateCodePoints(val, 1024);
@@ -324,7 +348,7 @@ export function createClaudeSender(threadId: string) {
                             const fields = embed.fields ?? [];
                             fields.push({
                                 name: `✅ Result${suffix}`,
-                                value: `\`\`\`\n${preview}\n\`\`\``,
+                                value: `\`\`\`\n${escapeCodeBlock(preview)}\n\`\`\``,
                                 inline: false,
                             });
                             await editEmbed(threadId, tracked.messageId, [{ ...embed, fields, color: 0x00ffff }]);
@@ -343,7 +367,7 @@ export function createClaudeSender(threadId: string) {
                         await sendEmbed(threadId, [{
                             color: 0x00ffff,
                             title: `✅ Tool Result${isTruncated ? ` (+${totalLines - 15} more lines)` : ''}`,
-                            description: `\`\`\`\n${preview}\n\`\`\``,
+                            description: `\`\`\`\n${escapeCodeBlock(preview)}\n\`\`\``,
                         }]);
                         log(`Sent standalone tool_result embed thread=${threadId}`);
                     }
@@ -415,9 +439,10 @@ export function createClaudeSender(threadId: string) {
                         );
                         if (stopReasonDisplay && stopReasonDisplay !== 'Completed') parts.push(stopReasonDisplay);
 
-                        await sendEmbed(threadId, [{
+                        const statusMsgId = await sendEmbed(threadId, [{
                             description: `**Done** · ${parts.join(' · ')}`,
                         }]);
+                        scheduleStatusDelete(threadId, statusMsgId);
                         log(`Sent completion stats thread=${threadId} model=${modelName} durationMs=${durationMs} stopReason=${stopReasonDisplay}`);
                     }
                     // } else if (msg.metadata?.cwd) {
@@ -440,7 +465,7 @@ export function createClaudeSender(threadId: string) {
                         await sendEmbed(threadId, [{
                             color: 0xffaa00,
                             title: chunks.length > 1 ? `Other Content (${i + 1}/${chunks.length})` : 'Other Content',
-                            description: `\`\`\`json\n${chunks[i]}\n\`\`\``,
+                            description: `\`\`\`json\n${escapeCodeBlock(chunks[i]!)}\n\`\`\``,
                         }]);
                     }
                     log(`Sent other content embed thread=${threadId} chunks=${chunks.length}`);
@@ -460,7 +485,7 @@ export function createClaudeSender(threadId: string) {
                         description: 'This tool was blocked by the current permission mode (`dontAsk`). The bot denies tools that aren\'t pre-approved.',
                         fields: [
                             { name: 'Tool', value: `\`${toolName}\``, inline: true },
-                            { name: 'Input Preview', value: `\`\`\`json\n${preview}\n\`\`\``, inline: false }
+                            { name: 'Input Preview', value: `\`\`\`json\n${escapeCodeBlock(preview)}\n\`\`\``, inline: false }
                         ],
                         footer: { text: 'Change operation mode with /settings → Mode Settings to allow more tools' },
                     }]);

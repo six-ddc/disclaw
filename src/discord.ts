@@ -390,6 +390,17 @@ export async function editRichMessage(channelId: string, messageId: string, payl
 /**
  * Add a reaction emoji to a message
  */
+export async function deleteMessage(channelId: string, messageId: string): Promise<void> {
+    try {
+        const channel = await getChannel(channelId);
+        const msg = await channel.messages.fetch(messageId);
+        await msg.delete();
+        log.debug(`Message deleted (channelId=${channelId}, messageId=${messageId})`);
+    } catch (e) {
+        log.debug(`Failed to delete message (channelId=${channelId}, messageId=${messageId}): ${e}`);
+    }
+}
+
 export async function addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     const channel = await getChannel(channelId);
     const msg = await channel.messages.fetch(messageId);
