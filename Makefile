@@ -16,13 +16,35 @@ typecheck: ## Run TypeScript type checking
 
 ## ── Service ───────────────────────────────────────────
 
-.PHONY: install uninstall start stop restart status logs
+.PHONY: install uninstall start stop restart status logs link-skills unlink-skills
 
-install:   ## Install as service (macOS: LaunchAgent, Linux: systemd)
+install:   ## Install as service + link skills
 	@bash $(MANAGE) install
+	@$(MAKE) --no-print-directory link-skills
 
-uninstall: ## Remove service registration
+uninstall: ## Remove service + unlink skills
+	@$(MAKE) --no-print-directory unlink-skills
 	@bash $(MANAGE) uninstall
+
+link-skills: ## Symlink project skills to ~/.claude/skills/
+	@mkdir -p ~/.claude/skills
+	@for d in $(CURDIR)/skills/*/; do \
+		name=$$(basename "$$d"); \
+		if [ -L ~/.claude/skills/"$$name" ]; then \
+			rm ~/.claude/skills/"$$name"; \
+		fi; \
+		ln -s "$$d" ~/.claude/skills/"$$name"; \
+		echo "  Linked skill: $$name → $$d"; \
+	done
+
+unlink-skills: ## Remove skill symlinks from ~/.claude/skills/
+	@for d in $(CURDIR)/skills/*/; do \
+		name=$$(basename "$$d"); \
+		if [ -L ~/.claude/skills/"$$name" ] && [ "$$(readlink ~/.claude/skills/"$$name")" = "$$d" ]; then \
+			rm ~/.claude/skills/"$$name"; \
+			echo "  Unlinked skill: $$name"; \
+		fi; \
+	done
 
 start:     ## Start the service
 	@bash $(MANAGE) start
