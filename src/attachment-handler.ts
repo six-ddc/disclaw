@@ -46,6 +46,21 @@ const log = createLogger('attachment');
 
 // --- Helpers ---
 
+/** Detect actual image media type from buffer magic bytes, falling back to declared type */
+function detectImageMediaType(buffer: Buffer, declaredType: string): string {
+    if (buffer.length < 12) return declaredType;
+    // PNG: 89 50 4E 47
+    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) return 'image/png';
+    // JPEG: FF D8 FF
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) return 'image/jpeg';
+    // GIF: 47 49 46 38
+    if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) return 'image/gif';
+    // WebP: RIFF....WEBP
+    if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46
+        && buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50) return 'image/webp';
+    return declaredType;
+}
+
 type AttachmentKind = 'image' | 'pdf' | 'text' | 'unsupported';
 
 function classifyAttachment(attachment: Attachment): AttachmentKind {
@@ -140,9 +155,14 @@ async function processAttachments(attachments: Attachment[]): Promise<ContentBlo
                         break;
                     }
                     const buffer = await downloadAttachment(attachment.url, MAX_IMAGE_BYTES);
-                    blocks.push(buildImageBlock(buffer, attachment.contentType || 'image/png'));
+                    const declaredType = attachment.contentType || 'image/png';
+                    const actualType = detectImageMediaType(buffer, declaredType);
+                    if (actualType !== declaredType) {
+                        log.warn(`Media type mismatch for "${attachment.name}": declared=${declaredType}, actual=${actualType}`);
+                    }
+                    blocks.push(buildImageBlock(buffer, actualType));
                     imageCount++;
-                    log(`Image attached: ${attachment.name} (${Math.round(buffer.length / 1024)}KB)`);
+                    log(`Image attached: ${attachment.name} (${Math.round(buffer.length / 1024)}KB, ${actualType})`);
                     break;
                 }
                 case 'pdf': {
@@ -205,8 +225,10 @@ async function fetchReplyContext(message: Message): Promise<ContentBlock[]> {
         for (const attachment of imageAttachments.slice(0, MAX_IMAGES_PER_MESSAGE)) {
             try {
                 const buffer = await downloadAttachment(attachment.url, MAX_IMAGE_BYTES);
-                blocks.push(buildImageBlock(buffer, attachment.contentType || 'image/png'));
-                log(`Reply image attached: ${attachment.name}`);
+                const declaredType = attachment.contentType || 'image/png';
+                const actualType = detectImageMediaType(buffer, declaredType);
+                blocks.push(buildImageBlock(buffer, actualType));
+                log(`Reply image attached: ${attachment.name} (${actualType})`);
             } catch (err) {
                 const errMsg = err instanceof Error ? err.message : String(err);
                 log.error(`Failed to fetch reply image "${attachment.name}": ${errMsg}`);
