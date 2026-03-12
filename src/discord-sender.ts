@@ -11,11 +11,16 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('discord-sender');
 
-/** Escape triple backticks inside content that will be wrapped in a code block.
- *  Inserts a zero-width space to break the sequence so Discord's parser won't
- *  prematurely close the fence. Invisible to readers. */
+/** Tools whose tool_use and tool_result are silently suppressed (content already sent to Discord) */
+const SILENT_TOOLS = new Set([
+    'mcp__disclaw__discord_send_image',
+    'mcp__disclaw__discord_send_media',
+    'mcp__disclaw__discord_send_file',
+]);
+
+/** Escape backticks inside content that will be wrapped in a code block. */
 function escapeCodeBlock(text: string): string {
-    return text.replaceAll('```', '\u02CB\u02CB\u02CB');
+    return text.replaceAll('`', '\\`');
 }
 
 /** Safely access a metadata field with a typed default */
@@ -174,6 +179,8 @@ function scheduleStatusDelete(threadId: string, messageId: string) {
 export function createClaudeSender(threadId: string) {
     // Map toolUseId → { discordMessageId, embeds } for correlating tool_result with tool_use
     const toolUseMessages = new Map<string, { messageId: string; embeds: EmbedData[] }>();
+    // Track toolUseIds from silent tools so their tool_results are also suppressed
+    const silentToolUseIds = new Set<string>();
     log.debug(`Created Claude sender for thread=${threadId}`);
 
     return async function sendClaudeMessages(messages: ClaudeMessage[]): Promise<void> {
@@ -196,6 +203,13 @@ export function createClaudeSender(threadId: string) {
                     const toolUseId = meta<string | undefined>(msg.metadata, 'toolUseId', undefined);
                     const displayName = formatToolName(toolName);
                     log.debug(`Processing tool_use thread=${threadId} tool=${displayName} toolUseId=${toolUseId}`);
+
+                    // Suppress tools that already send content directly to Discord
+                    if (SILENT_TOOLS.has(toolName)) {
+                        if (toolUseId) silentToolUseIds.add(toolUseId);
+                        log.debug(`Suppressed silent tool_use: ${toolName} toolUseId=${toolUseId}`);
+                        break;
+                    }
 
                     let embeds: EmbedData[];
 
@@ -226,7 +240,7 @@ export function createClaudeSender(threadId: string) {
                             description: todoList,
                             footer: { text: '⏳ Pending | 🔄 In Progress | ✅ Completed | 🔴 High | 🟡 Medium | 🟢 Low' },
                         }];
-                    } else if (toolName === 'disclaw_cron_create') {
+                    } else if (toolName === 'mcp__disclaw__cron_create') {
                         const schedule = meta<string>(toolInput, 'schedule', '');
                         const prompt = meta<string>(toolInput, 'prompt', '');
                         embeds = [{
@@ -237,19 +251,19 @@ export function createClaudeSender(threadId: string) {
                                 { name: 'Prompt', value: truncateCodePoints(prompt, 500) },
                             ],
                         }];
-                    } else if (toolName === 'disclaw_cron_delete') {
+                    } else if (toolName === 'mcp__disclaw__cron_delete') {
                         const jobId = meta<string>(toolInput, 'job_id', '');
                         embeds = [{
                             color: 0xff4444,
                             title: `🔧 \`${displayName}\``,
                             description: `Job: \`${jobId}\``,
                         }];
-                    } else if (toolName === 'disclaw_cron_list') {
+                    } else if (toolName === 'mcp__disclaw__cron_list') {
                         embeds = [{
                             color: 0x5865f2,
                             title: `🔧 \`${displayName}\``,
                         }];
-                    } else if (toolName === 'disclaw_title_generate') {
+                    } else if (toolName === 'mcp__disclaw__title_generate') {
                         embeds = [{
                             color: 0x5865f2,
                             title: `🔧 \`${displayName}\``,
@@ -327,12 +341,20 @@ export function createClaudeSender(threadId: string) {
                 }
 
                 case 'tool_result': {
+                    const toolUseId = meta<string | undefined>(msg.metadata, 'toolUseId', undefined);
+
+                    // Suppress results from silent tools
+                    if (toolUseId && silentToolUseIds.has(toolUseId)) {
+                        silentToolUseIds.delete(toolUseId);
+                        log.debug(`Suppressed silent tool_result: toolUseId=${toolUseId}`);
+                        break;
+                    }
+
                     // Filter out system reminder content
                     let cleanContent = msg.content;
                     cleanContent = cleanContent.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
                     cleanContent = cleanContent.replace(/\n\s*\n\s*\n/g, '\n\n');
 
-                    const toolUseId = meta<string | undefined>(msg.metadata, 'toolUseId', undefined);
                     const tracked = toolUseId ? toolUseMessages.get(toolUseId) : undefined;
                     log.debug(`Processing tool_result thread=${threadId} toolUseId=${toolUseId} hasTracked=${!!tracked} contentLength=${cleanContent.length}`);
 
@@ -457,18 +479,7 @@ export function createClaudeSender(threadId: string) {
                 }
 
                 case 'other': {
-                    log.debug(`Processing other message type thread=${threadId} contentLength=${msg.content.length}`);
-                    const jsonStr = JSON.stringify(msg.metadata || msg.content, null, 2);
-                    const maxChunkLength = 4096 - '```json\n\n```'.length - 50;
-                    const chunks = splitText(jsonStr, maxChunkLength);
-                    for (let i = 0; i < chunks.length; i++) {
-                        await sendEmbed(threadId, [{
-                            color: 0xffaa00,
-                            title: chunks.length > 1 ? `Other Content (${i + 1}/${chunks.length})` : 'Other Content',
-                            description: `\`\`\`json\n${escapeCodeBlock(chunks[i]!)}\n\`\`\``,
-                        }]);
-                    }
-                    log(`Sent other content embed thread=${threadId} chunks=${chunks.length}`);
+                    log.debug(`Skipping other message type thread=${threadId} contentLength=${msg.content.length}`);
                     break;
                 }
 

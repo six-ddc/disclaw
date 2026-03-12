@@ -37,7 +37,8 @@ import {
 import { handleDirPickInteraction } from './dir-picker.js';
 import { handleHistoryInteraction } from './history.js';
 import { handlePagerInteraction, hidePagerButtons, restorePagerButtons } from './tool-pager.js';
-import { initCronScheduler, createCronMcpServer, getCronScheduler } from './cron.js';
+import { initCronScheduler, getCronScheduler } from './cron.js';
+import { createDisclawMcpServer } from './mcp-server.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
 import { extractMessageContent } from './attachment-handler.js';
@@ -317,7 +318,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             sourceMessageId: message.id,
             eyesReaction: { channelId: thread.id, messageId: message.id },
             createMcpServers: parentId
-                ? () => ({ 'disclaw': createCronMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
+                ? () => ({ 'disclaw': createDisclawMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
                 : undefined,
         });
 
@@ -398,7 +399,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         parentChannelId: message.channelId,
         statusMessageId: statusMessage.id,
         eyesReaction: { channelId: message.channelId, messageId: message.id },
-        createMcpServers: () => ({ 'disclaw': createCronMcpServer(message.channelId, message.author.id, workingDir, undefined, thread.id) }),
+        createMcpServers: () => ({ 'disclaw': createDisclawMcpServer(message.channelId, message.author.id, workingDir, undefined, thread.id) }),
     });
 });
 

@@ -5,6 +5,12 @@
  * rate limit handling, queuing, and retry logic for free.
  */
 
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
+import { createWriteStream } from 'fs';
+import { unlink } from 'fs/promises';
+import { join } from 'path';
+import { tmpdir } from 'os';
 import type { Client, TextChannel } from 'discord.js';
 import { createLogger } from './logger.js';
 
@@ -299,6 +305,8 @@ export interface EmbedData {
     description?: string;
     fields?: Array<{ name: string; value: string; inline?: boolean }>;
     footer?: { text: string };
+    image?: { url: string };
+    thumbnail?: { url: string };
 }
 
 /**
@@ -411,6 +419,116 @@ export async function addReaction(channelId: string, messageId: string, emoji: s
 /**
  * Remove the bot's own reaction from a message
  */
+/**
+ * Send an image embedded in a rich embed to a Discord thread. Returns the message ID.
+ * Always attaches the file and uses attachment:// protocol for reliable rendering.
+ * - URL source: downloads to temp file first, then attaches
+ * - Local file: attaches directly
+ */
+export async function sendImageEmbed(threadId: string, source: string, options?: {
+    title?: string;
+    description?: string;
+    color?: number;
+}): Promise<string> {
+    const channel = await getChannel(threadId);
+    const isUrl = /^https?:\/\//.test(source);
+
+    let filePath: string;
+    let tmpPath: string | undefined;
+
+    if (isUrl) {
+        const filename = source.split('/').pop()?.split('?')[0] || 'image.png';
+        tmpPath = join(tmpdir(), `disclaw-${Date.now()}-${filename}`);
+        log.debug(`Downloading image URL to temp file: ${source} → ${tmpPath}`);
+        const res = await fetch(source);
+        if (!res.ok) throw new Error(`Failed to fetch image: ${res.status} ${res.statusText}`);
+        if (!res.body) throw new Error('Response body is empty');
+        await pipeline(Readable.fromWeb(res.body as import('stream/web').ReadableStream), createWriteStream(tmpPath));
+        filePath = tmpPath;
+    } else {
+        filePath = source;
+    }
+
+    const filename = filePath.split('/').pop() || 'image.png';
+    const embed: EmbedData = {
+        color: options?.color ?? 0x5865f2,
+        image: { url: `attachment://${filename}` },
+        ...(options?.title ? { title: options.title } : {}),
+        ...(options?.description ? { description: options.description } : {}),
+    };
+
+    try {
+        const msg = await channel.send({
+            embeds: [embed],
+            files: [{ attachment: filePath, name: filename }],
+        });
+        log(`Image embed sent to thread ${threadId} (source=${isUrl ? 'url' : 'file'}, messageId=${msg.id})`);
+        return msg.id;
+    } finally {
+        if (tmpPath) unlink(tmpPath).catch(() => {});
+    }
+}
+
+/**
+ * Send an audio or video to a Discord thread with native inline player.
+ * Discord only renders players for file attachments, not arbitrary URLs.
+ * - URL source: streams to temp file, sends as attachment, then cleans up
+ * - Local file: sends directly as attachment
+ */
+export async function sendMediaAttachment(threadId: string, source: string, options?: {
+    content?: string;
+}): Promise<string> {
+    const channel = await getChannel(threadId);
+    const isUrl = /^https?:\/\//.test(source);
+
+    let msg;
+    if (isUrl) {
+        // Stream to temp file — avoids holding large video in memory
+        const filename = source.split('/').pop()?.split('?')[0] || 'media';
+        const tmpPath = join(tmpdir(), `disclaw-${Date.now()}-${filename}`);
+        log.debug(`Streaming media URL to temp file: ${source} → ${tmpPath}`);
+
+        const res = await fetch(source);
+        if (!res.ok) throw new Error(`Failed to fetch media: ${res.status} ${res.statusText}`);
+        if (!res.body) throw new Error('Response body is empty');
+
+        await pipeline(Readable.fromWeb(res.body as import('stream/web').ReadableStream), createWriteStream(tmpPath));
+
+        try {
+            msg = await channel.send({
+                ...(options?.content ? { content: options.content } : {}),
+                files: [{ attachment: tmpPath, name: filename }],
+            });
+        } finally {
+            unlink(tmpPath).catch(() => {});
+        }
+    } else {
+        msg = await channel.send({
+            ...(options?.content ? { content: options.content } : {}),
+            files: [source],
+        });
+    }
+    log(`Media attachment sent to thread ${threadId} (source=${isUrl ? 'url' : 'file'}, messageId=${msg.id})`);
+    return msg.id;
+}
+
+/**
+ * Send a file as a downloadable attachment to a Discord thread. Returns the message ID.
+ * For non-previewable files (PDF, Markdown, ZIP, etc.) that users need to download.
+ */
+export async function sendFileAttachment(threadId: string, filePath: string, options?: {
+    content?: string;
+    filename?: string;
+}): Promise<string> {
+    const channel = await getChannel(threadId);
+    const msg = await channel.send({
+        ...(options?.content ? { content: options.content } : {}),
+        files: [{ attachment: filePath, name: options?.filename || filePath.split('/').pop() }],
+    });
+    log(`File attachment sent to thread ${threadId} (path=${filePath}, messageId=${msg.id})`);
+    return msg.id;
+}
+
 export async function removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     if (!client?.user) {
         log.warn(`Cannot remove reaction: client or user not available (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);

@@ -1,18 +1,12 @@
 /**
  * Cron Scheduler - Manages scheduled tasks with croner
  *
- * Provides CronScheduler class for job lifecycle management and
- * a factory function to create an SDK MCP server exposing cron tools.
+ * Provides CronScheduler class for job lifecycle management.
+ * MCP server factory is in mcp-server.ts.
  */
 
 import { resolve } from 'path';
 import { Cron } from 'croner';
-import { z } from 'zod/v4';
-import {
-    createSdkMcpServer,
-    tool,
-    type McpSdkServerConfigWithInstance,
-} from '@anthropic-ai/claude-agent-sdk';
 import {
     type Client,
     TextChannel,
@@ -27,14 +21,11 @@ import {
     setCronJobEnabled,
     setCronJobLastRun,
     deleteCronJob,
-    updateCronJob,
     getThreadMapping,
     getChannelConfigCached,
-    setThreadTitle,
-    cronJobDisplayName,
     type CronJob,
 } from './db.js';
-import { sendEmbed, renameThread, truncateCodePoints } from './discord.js';
+import { sendEmbed, truncateCodePoints } from './discord.js';
 import { sendCronControlPanel } from './cron-buttons.js';
 import { createLogger } from './logger.js';
 
@@ -338,227 +329,3 @@ export function getCronScheduler(): CronScheduler {
     return scheduler;
 }
 
-// =========================================================================
-// SDK MCP SERVER FACTORY
-// =========================================================================
-
-/**
- * Create a cron MCP server bound to a specific parent channel and user.
- * Each query() call gets its own instance so the tool handler knows context.
- */
-export function createCronMcpServer(
-    parentChannelId: string,
-    userId: string,
-    workingDir: string,
-    model?: string,
-    sourceThreadId?: string,
-): McpSdkServerConfigWithInstance {
-    const sched = getCronScheduler();
-
-    // Resolve display timezone for tool descriptions
-    const tzLabel = TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-    const cronCreateTool = tool(
-        'cron_create',
-        `Create a scheduled task that runs on a cron schedule. The task will execute in a dedicated Discord thread. Use standard cron expressions (e.g. "0 9 * * *" for daily at 9am, "*/30 * * * *" for every 30 minutes). IMPORTANT: All times are in the server's local timezone (${tzLabel}). Do NOT convert to UTC.`,
-        {
-            schedule: z.string().describe('Cron expression (e.g. "0 9 * * *" for daily at 9am)'),
-            prompt: z.string().describe('The prompt/instruction to execute on each run'),
-            name: z.string().optional().describe('Short display name for the task (used in thread title and listings). If omitted, the prompt is used as fallback.'),
-        },
-        async (args) => {
-            log(`MCP cron_create invoked: schedule=${args.schedule}, name=${args.name || '(none)'}`);
-            // Validate cron expression
-            try {
-                new Cron(args.schedule);
-            } catch (err) {
-                log.warn(`MCP cron_create: invalid cron expression "${args.schedule}": ${err}`);
-                return {
-                    content: [{ type: 'text' as const, text: `Invalid cron expression: ${err}` }],
-                    isError: true,
-                };
-            }
-
-            try {
-                const result = await sched.createJobWithThread({
-                    parentChannelId,
-                    creatorId: userId,
-                    schedule: args.schedule,
-                    prompt: args.prompt,
-                    workingDir,
-                    model,
-                    name: args.name,
-                });
-
-                const nextRun = sched.getNextRun(result.jobId);
-
-                log(`MCP cron_create succeeded: jobId=${result.jobId}, threadId=${result.threadId}`);
-
-                // Send reference in the source thread
-                if (sourceThreadId) {
-                    await sendEmbed(sourceThreadId, [{
-                        color: 0x5865f2,
-                        title: 'Scheduled Task Created',
-                        description: `\`${args.schedule}\` → <#${result.threadId}>`,
-                        footer: { text: `Job ID: ${result.jobId}` },
-                    }]).catch(err => log.error(`Failed to send cron ref to thread ${sourceThreadId}: ${err}`));
-                }
-
-                return {
-                    content: [{
-                        type: 'text' as const,
-                        text: JSON.stringify({
-                            job_id: result.jobId,
-                            thread_id: result.threadId,
-                            schedule: args.schedule,
-                            name: args.name || null,
-                            next_run: nextRun?.toISOString() || 'unknown',
-                        }),
-                    }],
-                };
-            } catch (err) {
-                log.error(`MCP cron_create failed: ${err}`);
-                return {
-                    content: [{ type: 'text' as const, text: `Failed to create cron job: ${err}` }],
-                    isError: true,
-                };
-            }
-        },
-    );
-
-    const cronListTool = tool(
-        'cron_list',
-        'List all scheduled tasks',
-        {},
-        async () => {
-            log.debug('MCP cron_list invoked');
-            const jobs = listCronJobs();
-            log.debug(`MCP cron_list: returning ${jobs.length} jobs`);
-            const result = jobs.map(j => ({
-                job_id: j.job_id,
-                name: j.name || null,
-                schedule: j.schedule,
-                prompt: truncateCodePoints(j.prompt, 100),
-                enabled: !!j.enabled,
-                thread_id: j.thread_id,
-                next_run: sched.getNextRun(j.job_id)?.toISOString() || null,
-            }));
-            return {
-                content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-            };
-        },
-    );
-
-    const cronDeleteTool = tool(
-        'cron_delete',
-        'Delete a scheduled task by job ID',
-        {
-            job_id: z.string().describe('The job ID to delete'),
-        },
-        async (args) => {
-            log(`MCP cron_delete invoked: jobId=${args.job_id}`);
-            const deleted = sched.delete(args.job_id);
-            if (!deleted) {
-                log.warn(`MCP cron_delete: job not found: ${args.job_id}`);
-                return {
-                    content: [{ type: 'text' as const, text: `Job not found: ${args.job_id}` }],
-                    isError: true,
-                };
-            }
-            return {
-                content: [{ type: 'text' as const, text: `Deleted job ${args.job_id}` }],
-            };
-        },
-    );
-
-    const cronUpdateTool = tool(
-        'cron_update',
-        `Update a scheduled task. Can modify any combination of name, schedule, and prompt. If name is changed, the thread title is updated accordingly. If schedule is changed, the cron job is re-registered. All times are in the server's local timezone (${tzLabel}).`,
-        {
-            job_id: z.string().describe('The job ID to update'),
-            name: z.string().optional().describe('New display name for the task'),
-            schedule: z.string().optional().describe('New cron expression'),
-            prompt: z.string().optional().describe('New prompt/instruction'),
-        },
-        async (args) => {
-            log(`MCP cron_update invoked: jobId=${args.job_id}`);
-            const job = getCronJob(args.job_id);
-            if (!job) {
-                log.warn(`MCP cron_update: job not found: ${args.job_id}`);
-                return {
-                    content: [{ type: 'text' as const, text: `Job not found: ${args.job_id}` }],
-                    isError: true,
-                };
-            }
-
-            // Validate new schedule if provided
-            if (args.schedule) {
-                try {
-                    new Cron(args.schedule);
-                } catch (err) {
-                    log.warn(`MCP cron_update: invalid cron expression "${args.schedule}": ${err}`);
-                    return {
-                        content: [{ type: 'text' as const, text: `Invalid cron expression: ${err}` }],
-                        isError: true,
-                    };
-                }
-            }
-
-            // Update DB fields
-            const fields: { name?: string; schedule?: string; prompt?: string } = {};
-            if (args.name !== undefined) fields.name = args.name;
-            if (args.schedule !== undefined) fields.schedule = args.schedule;
-            if (args.prompt !== undefined) fields.prompt = args.prompt;
-            updateCronJob(args.job_id, fields);
-
-            // Re-register if schedule changed
-            if (args.schedule && job.enabled) {
-                const updated = getCronJob(args.job_id)!;
-                sched.register(updated);
-                log(`Re-registered job ${args.job_id} with new schedule: ${args.schedule}`);
-            }
-
-            // Update thread name if name changed
-            if (args.name !== undefined) {
-                const newThreadName = truncateCodePoints(`\u{23F0} ${args.name}`, 50);
-                await renameThread(job.thread_id, newThreadName).catch(err => log.error(`Failed to rename thread for job ${args.job_id}: ${err}`));
-                setThreadTitle(job.thread_id, newThreadName);
-            }
-
-            const changed = Object.keys(fields).join(', ');
-            log(`MCP cron_update succeeded for job ${args.job_id}: updated ${changed}`);
-            return {
-                content: [{ type: 'text' as const, text: `Updated job ${args.job_id}: ${changed}` }],
-            };
-        },
-    );
-
-    const titleGenerateTool = tool(
-        'title_generate',
-        'Regenerate or update the title of the current Discord thread. Clears the current title so it will be regenerated when this query completes. Use when the user asks to update, regenerate, or change the thread title.',
-        {},
-        async () => {
-            log.debug(`MCP title_generate invoked (sourceThreadId=${sourceThreadId || 'none'})`);
-            if (!sourceThreadId) {
-                log.warn('MCP title_generate: no thread context available');
-                return {
-                    content: [{ type: 'text' as const, text: 'No thread context available.' }],
-                    isError: true,
-                };
-            }
-
-            // Clear the title — runner will regenerate it after this query completes
-            setThreadTitle(sourceThreadId, '');
-            log(`Title cleared for thread ${sourceThreadId}, will regenerate on query completion`);
-
-            return {
-                content: [{ type: 'text' as const, text: 'Title will be regenerated when this response completes.' }],
-            };
-        },
-    );
-
-    return createSdkMcpServer({
-        name: 'disclaw',
-        tools: [cronCreateTool, cronListTool, cronDeleteTool, cronUpdateTool, titleGenerateTool],
-    });
-}
