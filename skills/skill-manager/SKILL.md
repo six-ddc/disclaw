@@ -1,6 +1,6 @@
 ---
 name: skill-manager
-description: Install, uninstall, list, inspect, and create agent skills from local paths, GitHub URLs, or the anthropics/skills registry. Use when the user wants to manage skills, install a new skill, remove a skill, browse installed skills, create a new skill, or pastes a GitHub URL containing a SKILL.md file. Also triggers when the user says "install skill", "add skill", "remove skill", "list skills", "show skills", "create skill", "new skill", or mentions skill management in any way.
+description: Search, install, uninstall, list, inspect, and create agent skills from local paths, GitHub URLs, the skills.sh ecosystem, or the anthropics/skills registry. Use when the user wants to manage skills, find a skill, install a new skill, remove a skill, browse installed skills, create a new skill, or pastes a GitHub URL containing a SKILL.md file. Also triggers when the user says "find skill", "search skill", "install skill", "add skill", "remove skill", "list skills", "show skills", "create skill", "new skill", "is there a skill for", or mentions skill management in any way.
 ---
 
 # Skill Manager
@@ -13,6 +13,24 @@ Manage skills across two scopes:
 | **Project** | `.claude/skills/<name>/` | Current project only |
 
 Default scope is **user** unless the user specifies project-level.
+
+## Search
+
+Find skills from the open skills ecosystem via [skills.sh](https://skills.sh/):
+
+```bash
+npx skills find [query]
+```
+
+Map user intent to search keywords:
+
+| User says | Search query |
+|-----------|-------------|
+| "help me review PRs" | `npx skills find pr review` |
+| "make my React app faster" | `npx skills find react performance` |
+| "I need to create a changelog" | `npx skills find changelog` |
+
+Present results with skill name, description, and install command. If no results, offer to help directly and suggest creating a custom skill.
 
 ## Install
 
@@ -77,6 +95,16 @@ curl -fsSL "$RAW_URL" -o ~/.claude/skills/<name>/SKILL.md
 Convert GitHub blob URLs to raw URLs: replace `github.com` with `raw.githubusercontent.com` and remove `/blob/`.
 
 Always clean up temp directories after install: `rm -rf "$TEMP"`
+
+### From skills.sh ecosystem
+
+Install a skill found via `npx skills find`:
+
+```bash
+npx skills add <owner/repo@skill> -g -y
+```
+
+`-g` installs globally (user-level), `-y` skips confirmation.
 
 ### From .skill file
 
