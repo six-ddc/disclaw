@@ -5,7 +5,7 @@
  * of SDKMessages, enabling real-time streaming to Discord.
  */
 
-import { query, type SDKMessage, type Query, type SDKResultMessage, type McpServerConfig, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type SDKMessage, type Query, type McpServerConfig, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MultimodalPrompt } from './attachment-handler.js';
 import { createLogger } from './logger.js';
 
@@ -104,7 +104,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
             type: 'user',
             message: { role: 'user', content: prompt.blocks },
             parent_tool_use_id: null,
-            session_id: sessionId || crypto.randomUUID(),
+            session_id: sessionId || '',
         };
         sdkPrompt = (async function*() { yield userMessage; })();
         log.debug(`Prompt type: multimodal blocks (${prompt.blocks.length} content blocks)`);
@@ -223,8 +223,8 @@ export async function generateTitle(context: Array<{ role: string; text: string 
 
     for await (const message of iterator) {
         log.debug(`Title generation message: type=${message.type}`);
-        if (message.type === 'result' && 'result' in message) {
-            title = (message as SDKResultMessage & { result?: string }).result || '';
+        if (message.type === 'result' && message.subtype === 'success') {
+            title = message.result || '';
         }
     }
 

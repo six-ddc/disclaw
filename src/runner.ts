@@ -210,10 +210,9 @@ class JobRunner {
 
                     // Detect new/changed session from SDK init message
                     // Skip ephemeral sessions (persistSession: false, e.g. cron jobs)
-                    if (sdkMessage.type === 'system' && (sdkMessage as Record<string, unknown>).subtype === 'init'
+                    if (sdkMessage.type === 'system' && sdkMessage.subtype === 'init'
                         && job.persistSession !== false) {
-                        const initMsg = sdkMessage as Record<string, unknown>;
-                        const initSessionId = initMsg.session_id as string;
+                        const { session_id: initSessionId, model: initModel, cwd: initCwd } = sdkMessage;
                         log(`Init: sdk_session=${initSessionId}, job.sessionId=${job.sessionId || '(empty)'}`);
                         if (initSessionId && initSessionId !== job.sessionId) {
                             // Save SDK-generated session ID to DB
@@ -226,8 +225,8 @@ class JobRunner {
                                 metadata: {
                                     subtype: 'new_session',
                                     label,
-                                    model: initMsg.model,
-                                    cwd: initMsg.cwd,
+                                    model: initModel,
+                                    cwd: initCwd,
                                 },
                             }]);
                         }
