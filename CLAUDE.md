@@ -37,8 +37,8 @@ There are no tests or linting configured.
 **Working directory resolution (fallback chain):** `[/path]` message prefix override → `mapping.working_dir` (thread-level) → channel config → `CLAUDE_WORKING_DIR` env → `process.cwd()`. Thread-level override is set via `/disclaw cd` in a thread, which also clears the session (new directory = fresh session).
 
 **Key source files:**
-- `src/bot.ts` — Discord event routing (MessageCreate, interaction dispatch). No command handler logic — delegates to `interactions.ts`
-- `src/interactions.ts` — All `/disclaw` slash command handlers and `validateWorkingDir`. Thread-only commands use `requireThreadSession()` guard
+- `src/bot.ts` — Discord event routing (MessageCreate, MessageReactionAdd/Remove, interaction dispatch). No command handler logic — delegates to `interactions.ts`
+- `src/interactions.ts` — All `/disclaw` slash command handlers and `validateWorkingDir`. Thread-only commands use `requireThreadSession()` guard. Config modal (model/permission/display) uses `LabelBuilder` + `ModalBuilder`
 - `src/dir-picker.ts` — Interactive button-based directory browser for Discord. Navigation: subdirectory buttons (paginated), Up/Prev/Next, Select/Cancel. 2-minute timeout
 - `src/runner.ts` — In-process job runner with concurrency control (semaphore), per-thread job serialization, retry with exponential backoff. Tracks active `Query` objects per thread for interrupt support. Detects session changes from SDK init messages
 - `src/claude-client.ts` — SDK wrapper; calls `query()` and streams SDKMessages via `onMessage` callback. Supports `model`, `forkSession`, `resumeSessionAt`, `canUseTool`, `permissionMode`, `persistSession` options
@@ -56,11 +56,10 @@ There are no tests or linting configured.
 - `cd` — Set working directory (channel default or thread override; interactive dir picker)
 - `clear` — Clear conversation context, start fresh (thread-only)
 - `interrupt` — Interrupt current Claude processing (thread-only)
-- `model` — Switch Claude model via select menu (thread-only)
+- `config` — Configure model, permission mode, and display mode via modal with select menus (thread-only)
 - `fork` — Fork conversation into a new thread (thread-only)
 - `resume` — Resume a previous session via select menu (any location)
 - `cron` — List all scheduled tasks (any location)
-- `permission` — Set per-thread permission mode via select menu (thread-only). Modes: default, dontAsk, acceptEdits, bypassPermissions, plan
 
 **Data stores:**
 - SQLite (`./data/threads.db`) — thread/session mappings (incl. working_dir, model, permission_mode), channel configs, cron_jobs
