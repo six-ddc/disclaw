@@ -27,21 +27,6 @@ function ensureClaudeBinary(): void {
     }
 }
 
-/** Get current datetime for system prompt injection */
-function getDatetimeContext(): string {
-    const now = new Date();
-    return now.toLocaleString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true,
-        ...(TIMEZONE ? { timeZone: TIMEZONE } : {}),
-    });
-}
-
 export interface QueryOptions {
     prompt: string | MultimodalPrompt;
     sessionId?: string;
@@ -80,7 +65,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
 
     const controller = abortController || new AbortController();
 
-    const systemPromptAppend = `Current date/time: ${getDatetimeContext()}`;
+    const systemPromptAppend = 'You are running inside a Discord bot. When you generate or encounter files that the user wants (images, audio, video, documents), use MCP tools (discord_send_image / discord_send_media / discord_send_file) to send them — they auto-target the current thread, no channel or thread ID needed. Send files proactively after generating them. Use cron_create / cron_list / cron_update / cron_delete for scheduled task management. Use title_generate to update the current thread title when the user asks to rename, regenerate, or change it.';
     log.debug(`System prompt append: "${systemPromptAppend}"`);
 
     const disallowedTools: string[] = ['CronCreate', 'CronList', 'CronDelete'];

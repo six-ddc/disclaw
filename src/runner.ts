@@ -169,7 +169,7 @@ class JobRunner {
         const sender = createClaudeSender(job.threadId);
         // Resolve display mode: DB mapping > default
         const mapping = getThreadMapping(job.threadId);
-        const displayMode: DisplayMode = (mapping?.display_mode as DisplayMode) || 'verbose';
+        const displayMode: DisplayMode = (mapping?.display_mode as DisplayMode) || 'pager';
         log.debug(`Display mode for thread=${job.threadId}: ${displayMode}`);
         const pager = displayMode === 'pager' ? createToolPager(job.threadId) : null;
         if (pager) log.debug(`Pager created for thread=${job.threadId}`);
@@ -289,8 +289,9 @@ class JobRunner {
             // Update channel status message with the final reply
             if (job.statusMessageId && job.parentChannelId && lastResultText) {
                 const statusText = truncateCodePoints(lastResultText, 1900);
+                log.debug(`Updating status message: channel=${job.parentChannelId} message=${job.statusMessageId} thread=${job.threadId} textLen=${statusText.length}`);
                 await editMessage(job.parentChannelId, job.statusMessageId, statusText).catch(err => {
-                    log.warn(`Failed to update status message for thread=${job.threadId}: ${err}`);
+                    log.warn(`Failed to update status message: channel=${job.parentChannelId} message=${job.statusMessageId} thread=${job.threadId}: ${err}`);
                 });
             }
 

@@ -303,7 +303,7 @@ export async function handleConfig(interaction: ChatInputCommandInteraction) {
 
     const currentModel = ctx.mapping.model || models[0]?.value || '';
     const currentPermission = ctx.mapping.permission_mode || process.env.DISCLAW_PERMISSION_MODE || 'default';
-    const currentDisplay = ctx.mapping.display_mode || 'verbose';
+    const currentDisplay = ctx.mapping.display_mode || 'pager';
 
     log.debug(`config: current model=${currentModel} permission=${currentPermission} display=${currentDisplay} thread=${ctx.threadId}`);
 

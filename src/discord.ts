@@ -11,6 +11,7 @@ import { createWriteStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { Routes } from 'discord.js';
 import type { Client, TextChannel } from 'discord.js';
 import { createLogger } from './logger.js';
 
@@ -351,8 +352,7 @@ export async function sendEmbed(threadId: string, embeds: EmbedData[]): Promise<
  */
 export async function editEmbed(channelId: string, messageId: string, embeds: EmbedData[]): Promise<void> {
     const channel = await getChannel(channelId);
-    const msg = await channel.messages.fetch(messageId);
-    await msg.edit({ embeds });
+    await channel.messages.edit(messageId, { embeds });
     log.debug(`Embed edited (channelId=${channelId}, messageId=${messageId}, ${embeds.length} embeds)`);
 }
 
@@ -365,15 +365,13 @@ export async function editMessage(channelId: string, messageId: string, content:
         log.debug(`Skipping empty edit for message ${messageId} in ${channelId}`);
         return;
     }
-    const channel = await getChannel(channelId);
-    const message = await channel.messages.fetch(messageId);
     let processed = flattenTables(content);
     if (suppressLinkPreviews) processed = wrapUrls(processed);
-    // Ensure content stays within Discord's 2000-char limit after processing
     if (processed.length > 2000) {
         processed = truncateCodePoints(processed, 2000);
     }
-    await message.edit(processed);
+    const channel = await getChannel(channelId);
+    await channel.messages.edit(messageId, processed);
     log.debug(`Message edited (channelId=${channelId}, messageId=${messageId}, ${processed.length} chars)`);
 }
 
@@ -409,8 +407,7 @@ export async function sendRichMessage(channelId: string, payload: Parameters<Tex
  */
 export async function editRichMessage(channelId: string, messageId: string, payload: import('discord.js').MessageEditOptions): Promise<void> {
     const channel = await getChannel(channelId);
-    const msg = await channel.messages.fetch(messageId);
-    await msg.edit(payload);
+    await channel.messages.edit(messageId, payload);
     log.debug(`Rich message edited (channelId=${channelId}, messageId=${messageId})`);
 }
 
@@ -420,8 +417,7 @@ export async function editRichMessage(channelId: string, messageId: string, payl
 export async function deleteMessage(channelId: string, messageId: string): Promise<void> {
     try {
         const channel = await getChannel(channelId);
-        const msg = await channel.messages.fetch(messageId);
-        await msg.delete();
+        await channel.messages.delete(messageId);
         log.debug(`Message deleted (channelId=${channelId}, messageId=${messageId})`);
     } catch (e) {
         log.debug(`Failed to delete message (channelId=${channelId}, messageId=${messageId}): ${e}`);
@@ -430,8 +426,7 @@ export async function deleteMessage(channelId: string, messageId: string): Promi
 
 export async function addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     const channel = await getChannel(channelId);
-    const msg = await channel.messages.fetch(messageId);
-    await msg.react(emoji);
+    await channel.messages.react(messageId, emoji);
     log.debug(`Reaction added (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
 }
 
@@ -549,12 +544,10 @@ export async function sendFileAttachment(threadId: string, filePath: string, opt
 }
 
 export async function removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
-    if (!client?.user) {
-        log.warn(`Cannot remove reaction: client or user not available (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
+    if (!client) {
+        log.warn(`Cannot remove reaction: client not available (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
         return;
     }
-    const channel = await getChannel(channelId);
-    const msg = await channel.messages.fetch(messageId);
-    await msg.reactions.resolve(emoji)?.users.remove(client.user.id);
+    await client.rest.delete(Routes.channelMessageOwnReaction(channelId, messageId, encodeURIComponent(emoji)));
     log.debug(`Reaction removed (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
 }
