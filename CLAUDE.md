@@ -20,10 +20,13 @@ make restart       # Restart the service
 make status        # Show service status
 make logs          # Follow service logs
 make deploy        # Type-check + restart
+make uninstall     # Remove service + unlink skills
+make link-skills   # Symlink project skills to ~/.claude/skills/
+make unlink-skills # Remove skill symlinks from ~/.claude/skills/
 
 # Development
 make dev           # Start with hot reload (bun --watch, not as service)
-bunx tsc --noEmit  # Type checking
+make typecheck     # Type checking (bunx tsc --noEmit)
 ```
 
 There are no tests or linting configured.
@@ -44,13 +47,17 @@ There are no tests or linting configured.
 - `src/claude-client.ts` — SDK wrapper; calls `query()` and streams SDKMessages via `onMessage` callback. Supports `model`, `forkSession`, `resumeSessionAt`, `canUseTool`, `permissionMode`, `persistSession` options
 - `src/user-input.ts` — Handles SDK `canUseTool` callback via Discord interactive components. Manages AskUserQuestion (buttons/selects/modals) and tool approval UI (Allow/Deny/Always Allow). Per-thread auto-approved tools. 5-minute timeout
 - `src/attachment-handler.ts` — Multimodal content extraction: images (PNG/JPEG/GIF/WebP, max 20MB, max 5), PDFs (max 20MB), text files (max 100KB), and reply references. Converts Discord attachments to Claude API content blocks
-- `src/message-converter.ts` — Transforms raw SDKMessages into normalized `ClaudeMessage` objects (text, tool_use, tool_result, thinking, system, permission_denied, task_started, task_notification, tool_progress, tool_summary)
-- `src/discord-sender.ts` — Renders `ClaudeMessage` objects as Discord embeds/messages with rich formatting (tool previews, syntax highlighting, completion stats, session change notifications)
+- `src/message-converter.ts` — Transforms raw SDKMessages into normalized `ClaudeMessage` objects (text, tool_use, tool_result, thinking, system, permission_denied, task_started, task_notification, task_progress, tool_progress, tool_summary, other)
+- `src/discord-sender.ts` — Renders `ClaudeMessage` objects as Discord embeds/messages with rich formatting. Delegates tool embed construction to `tool-embeds.ts`. Handles completion stats, session change notifications, and auto-deleting status messages
 - `src/history.ts` — Paginated session history viewer. Uses SDK `getSessionMessages()`, renders as Discord embed with ◀/▶ navigation buttons. Used by fork, resume, and rewind
 - `src/discord.ts` — Discord REST API helpers (send, edit, typing indicators), markdown splitting with table flattening
-- `src/db.ts` — SQLite database for thread→session mappings, channel configs, and cron jobs. Thread mappings include: session_id, working_dir, model, fork_from, permission_mode, title
-- `src/cron.ts` — Scheduled task system: `CronScheduler` class managing job lifecycle (register, pause, resume, delete, runNow). Auto-pauses after 3 consecutive failures. Exposes SDK MCP server with tools: `cron_create`, `cron_list`, `cron_delete`, `cron_update`, `title_generate`
+- `src/db.ts` — SQLite database for thread→session mappings, channel configs, cron jobs, and pager messages. Thread mappings include: session_id, working_dir, model, fork_from, permission_mode, display_mode, title
+- `src/cron.ts` — Scheduled task system: `CronScheduler` class managing job lifecycle (register, pause, resume, delete, runNow). Auto-pauses after 3 consecutive failures
 - `src/cron-buttons.ts` — Cron control panel UI: persistent Discord buttons for Pause/Resume, Run Now, Verbose toggle, Delete
+- `src/mcp-server.ts` — MCP server factory creating per-query SDK MCP servers. Exposes 8 tools: `cron_create`, `cron_list`, `cron_delete`, `cron_update` (cron management), `title_generate` (thread title), `discord_send_image`, `discord_send_media`, `discord_send_file` (Discord media). File validation with extension whitelist and 25MB size limit
+- `src/tool-embeds.ts` — Shared tool embed building logic used by both `discord-sender.ts` (verbose mode) and `tool-pager.ts` (pager mode). Provides `buildToolUseEmbed()`, `buildToolResultField()`, `truncateContent()`, `formatToolName()` with specialized formatting for Agent, Edit, Write, Read/Glob/Grep, TodoWrite, Bash, cron tools, and generic tools
+- `src/tool-pager.ts` — Two-phase paginated display for tool calls/thinking/text in a single navigable Discord embed. Phase 1 (live): in-memory with debounced updates during job execution. Phase 2 (persistent): SDK-backed on-demand page rendering after completion. Supports reaction-triggered button restore/hide and auto-upgrade across bot restarts. Buttons auto-strip after 30s or when next pager appears
+- `src/logger.ts` — Centralized logging with pino; outputs to both console and daily JSON log files (`logs/YYYY-MM-DD.log`)
 
 **Slash commands (`/disclaw <subcommand>`):**
 - `cd` — Set working directory (channel default or thread override; interactive dir picker)
@@ -62,7 +69,7 @@ There are no tests or linting configured.
 - `cron` — List all scheduled tasks (any location)
 
 **Data stores:**
-- SQLite (`./data/threads.db`) — thread/session mappings (incl. working_dir, model, permission_mode), channel configs, cron_jobs
+- SQLite (`./data/threads.db`) — thread/session mappings (incl. working_dir, model, permission_mode, display_mode), channel configs, cron_jobs, pager_messages
 - No message content is stored (privacy-first design)
 
 ## Runtime & Build
@@ -70,7 +77,7 @@ There are no tests or linting configured.
 - **Runtime:** Bun (TypeScript executed natively, no build/compile step)
 - **Module system:** ESM (`"type": "module"`)
 - **TypeScript:** Strict mode with `noUncheckedIndexedAccess` and `noImplicitOverride` enabled; `noEmit: true` (type checking only)
-- **Key dependencies:** discord.js, @anthropic-ai/claude-agent-sdk, croner (cron scheduling)
+- **Key dependencies:** discord.js, @anthropic-ai/claude-agent-sdk, croner (cron scheduling), zod (schema validation), pino / pino-pretty (structured logging)
 
 ## Service
 
@@ -87,4 +94,4 @@ Uses `pino` (`src/logger.ts`). Output goes to both console and `logs/YYYY-MM-DD.
 
 ## Environment Variables
 
-Required: `DISCORD_BOT_TOKEN`. Optional: `CLAUDE_WORKING_DIR`, `DISCLAW_ALLOWED_DIRS` (comma-separated security allowlist), `DB_PATH` (default: `./data/threads.db`), `DISCLAW_PERMISSION_MODE` (default: `default`; options: `default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`), `TZ`. See `.env.example`.
+Required: `DISCORD_BOT_TOKEN`. Optional: `CLAUDE_WORKING_DIR`, `DISCLAW_ALLOWED_DIRS` (comma-separated security allowlist), `DB_PATH` (default: `./data/threads.db`), `DISCLAW_PERMISSION_MODE` (default: `default`; options: `default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`), `SHOW_LINK_PREVIEWS` (show URL embeds in bot messages), `TZ`. See `.env.example`.

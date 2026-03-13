@@ -3,6 +3,9 @@
  *
  * Each SDKMessage is converted into one or more ClaudeMessage objects
  * that can be rendered as Discord embeds.
+ *
+ * ClaudeMessage is a discriminated union on `type` — switching on `msg.type`
+ * narrows to the correct variant with typed fields (no Record<string, unknown>).
  */
 
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -10,12 +13,118 @@ import { createLogger } from './logger.js';
 
 const log = createLogger('msg-converter');
 
-export interface ClaudeMessage {
-    type: 'text' | 'tool_use' | 'tool_result' | 'thinking' | 'system' | 'other'
-        | 'permission_denied' | 'task_notification' | 'task_started' | 'tool_progress' | 'tool_summary';
+// =========================================================================
+// ClaudeMessage discriminated union
+// =========================================================================
+
+interface TextMessage { type: 'text'; content: string }
+interface ThinkingMessage { type: 'thinking'; content: string }
+interface OtherMessage { type: 'other'; content: string }
+
+interface ToolUseMessage {
+    type: 'tool_use';
     content: string;
-    metadata?: Record<string, unknown>;
+    name: string;
+    toolUseId?: string;
+    input: Record<string, unknown>;
 }
+
+interface ToolResultMessage {
+    type: 'tool_result';
+    content: string;
+    toolUseId?: string;
+}
+
+/**
+ * System messages are polymorphic by `subtype` (new_session, completion, init, etc.).
+ * The `metadata` bag holds subtype-specific fields that vary too much to enumerate.
+ */
+interface SystemMessage {
+    type: 'system';
+    content: string;
+    subtype: string;
+    metadata: Record<string, unknown>;
+}
+
+interface PermissionDeniedMessage {
+    type: 'permission_denied';
+    content: string;
+    toolName: string;
+    toolUseId?: string;
+    toolInput: Record<string, unknown>;
+}
+
+export interface TaskUsage {
+    total_tokens: number;
+    tool_uses: number;
+    duration_ms: number;
+}
+
+interface TaskStartedMessage {
+    type: 'task_started';
+    content: string;
+    taskId: string;
+    /** tool_use_id of the Agent tool call that spawned this task */
+    toolUseId?: string;
+    taskType?: string;
+    prompt?: string;
+}
+
+interface TaskNotificationMessage {
+    type: 'task_notification';
+    content: string;
+    taskId: string;
+    toolUseId?: string;
+    status: string;
+    summary?: string;
+    outputFile?: string;
+    usage?: TaskUsage;
+}
+
+interface TaskProgressMessage {
+    type: 'task_progress';
+    content: string;
+    taskId: string;
+    toolUseId?: string;
+    lastToolName?: string;
+    summary?: string;
+    usage?: TaskUsage;
+}
+
+interface ToolProgressMessage {
+    type: 'tool_progress';
+    content: string;
+    toolUseId?: string;
+    toolName: string;
+    elapsedSeconds: number;
+}
+
+interface ToolSummaryMessage {
+    type: 'tool_summary';
+    content: string;
+    toolUseIds?: string[];
+}
+
+export type ClaudeMessage =
+    | TextMessage
+    | ThinkingMessage
+    | OtherMessage
+    | ToolUseMessage
+    | ToolResultMessage
+    | SystemMessage
+    | PermissionDeniedMessage
+    | TaskStartedMessage
+    | TaskNotificationMessage
+    | TaskProgressMessage
+    | ToolProgressMessage
+    | ToolSummaryMessage;
+
+/** Extract the variant for a given type literal */
+export type ClaudeMessageOf<T extends ClaudeMessage['type']> = Extract<ClaudeMessage, { type: T }>;
+
+// =========================================================================
+// Converter
+// =========================================================================
 
 interface ContentBlock {
     type: string;
@@ -45,44 +154,27 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
                 messages.push({ type: 'text', content: textContent });
             }
 
-            // Process tool_use individually
-            const toolUseContent = content
-                .filter(c => c.type === 'tool_use');
-
-            for (const tool of toolUseContent) {
+            for (const tool of content.filter(c => c.type === 'tool_use')) {
                 log.debug(`Tool use: ${tool.name} (id=${tool.id})`);
                 messages.push({
                     type: 'tool_use',
                     content: '',
-                    metadata: { ...tool as Record<string, unknown>, toolUseId: tool.id }
+                    name: tool.name || 'Unknown',
+                    toolUseId: tool.id,
+                    input: (tool.input ?? {}) as Record<string, unknown>,
                 });
             }
 
-            // Process thinking content
-            const thinkingContent = content
-                .filter(c => c.type === 'thinking');
-
-            for (const thinking of thinkingContent) {
+            for (const thinking of content.filter(c => c.type === 'thinking')) {
                 if (thinking.thinking) {
                     log.debug(`Thinking block: ${thinking.thinking.length} chars`);
-                    messages.push({
-                        type: 'thinking',
-                        content: thinking.thinking
-                    });
+                    messages.push({ type: 'thinking', content: thinking.thinking });
                 }
             }
 
-            // Process other content
-            const otherContent = content
-                .filter(c => c.type !== 'text' && c.type !== 'tool_use' && c.type !== 'thinking');
-
-            for (const other of otherContent) {
+            for (const other of content.filter(c => c.type !== 'text' && c.type !== 'tool_use' && c.type !== 'thinking')) {
                 log.debug(`Other assistant content block: type=${other.type}`);
-                messages.push({
-                    type: 'other',
-                    content: JSON.stringify(other, null, 2),
-                    metadata: other as Record<string, unknown>
-                });
+                messages.push({ type: 'other', content: JSON.stringify(other, null, 2) });
             }
         } else {
             log.debug('Assistant message with no content blocks');
@@ -93,10 +185,7 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
             const blocks = content as ContentBlock[];
             log.debug(`User message: ${blocks.length} content blocks (types: ${blocks.map(c => c.type).join(', ')})`);
 
-            const toolResults = blocks
-                .filter(c => c.type === 'tool_result');
-
-            for (const result of toolResults) {
+            for (const result of blocks.filter(c => c.type === 'tool_result')) {
                 // content may be a string or MCP-style array [{type:'text', text:'...'}]
                 let resultContent: string;
                 if (typeof result.content === 'string') {
@@ -108,24 +197,14 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
                 } else {
                     resultContent = JSON.stringify(result, null, 2);
                 }
-                log.debug(`Tool result for toolUseId=${(result as Record<string, unknown>).tool_use_id}: ${resultContent.length} chars`);
-                messages.push({
-                    type: 'tool_result',
-                    content: resultContent,
-                    metadata: { toolUseId: (result as Record<string, unknown>).tool_use_id },
-                });
+                const toolUseId = (result as Record<string, unknown>).tool_use_id as string | undefined;
+                log.debug(`Tool result for toolUseId=${toolUseId}: ${resultContent.length} chars`);
+                messages.push({ type: 'tool_result', content: resultContent, toolUseId });
             }
 
-            const otherContent = blocks
-                .filter(c => c.type !== 'tool_result');
-
-            for (const other of otherContent) {
+            for (const other of blocks.filter(c => c.type !== 'tool_result')) {
                 log.debug(`Other user content block: type=${other.type}`);
-                messages.push({
-                    type: 'other',
-                    content: JSON.stringify(other, null, 2),
-                    metadata: other as Record<string, unknown>
-                });
+                messages.push({ type: 'other', content: JSON.stringify(other, null, 2) });
             }
         }
     } else if (jsonData.type === 'result') {
@@ -140,11 +219,9 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
                 messages.push({
                     type: 'permission_denied',
                     content: `Tool "${denial.tool_name}" was denied by permission mode`,
-                    metadata: {
-                        toolName: denial.tool_name,
-                        toolUseId: denial.tool_use_id,
-                        toolInput: denial.tool_input,
-                    }
+                    toolName: denial.tool_name,
+                    toolUseId: denial.tool_use_id,
+                    toolInput: denial.tool_input as Record<string, unknown>,
                 });
             }
         }
@@ -153,38 +230,58 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
         messages.push({
             type: 'system',
             content: '',
+            subtype: jsonData.subtype === 'success' ? 'completion' : 'error',
             metadata: {
-                ...jsonData,
-                subtype: jsonData.subtype === 'success' ? 'completion' : 'error',
+                ...jsonData as unknown as Record<string, unknown>,
                 sdkSubtype: jsonData.subtype,
-            }
+            },
         });
     } else if (jsonData.type === 'system') {
         log.debug(`System message: subtype=${jsonData.subtype}`);
         if (jsonData.subtype === 'task_notification') {
-            const msg = jsonData as SDKMessage & { task_id?: string; status?: string; output_file?: string; summary?: string };
-            log(`Task notification: taskId=${msg.task_id}, status=${msg.status}`);
+            const msg = jsonData as SDKMessage & {
+                task_id?: string; tool_use_id?: string; status?: string;
+                output_file?: string; summary?: string; usage?: TaskUsage;
+            };
+            log(`Task notification: taskId=${msg.task_id}, toolUseId=${msg.tool_use_id}, status=${msg.status}`);
             messages.push({
                 type: 'task_notification',
                 content: msg.summary || '',
-                metadata: {
-                    taskId: msg.task_id || '',
-                    status: msg.status,
-                    outputFile: msg.output_file,
-                    summary: msg.summary,
-                }
+                taskId: msg.task_id || '',
+                toolUseId: msg.tool_use_id,
+                status: msg.status || 'unknown',
+                summary: msg.summary,
+                outputFile: msg.output_file,
+                usage: msg.usage,
             });
         } else if (jsonData.subtype === 'task_started') {
-            const msg = jsonData as SDKMessage & { task_id?: string; description?: string; task_type?: string };
-            log(`Task started: taskId=${msg.task_id}, type=${msg.task_type}`);
+            const msg = jsonData as SDKMessage & {
+                task_id?: string; tool_use_id?: string; description?: string;
+                task_type?: string; prompt?: string;
+            };
+            log(`Task started: taskId=${msg.task_id}, toolUseId=${msg.tool_use_id}, type=${msg.task_type}`);
             messages.push({
                 type: 'task_started',
                 content: msg.description || '',
-                metadata: {
-                    taskId: msg.task_id || '',
-                    description: msg.description,
-                    taskType: msg.task_type,
-                }
+                taskId: msg.task_id || '',
+                toolUseId: msg.tool_use_id,
+                taskType: msg.task_type,
+                prompt: msg.prompt,
+            });
+        } else if (jsonData.subtype === 'task_progress') {
+            const msg = jsonData as SDKMessage & {
+                task_id?: string; tool_use_id?: string; description?: string;
+                last_tool_name?: string; summary?: string; usage?: TaskUsage;
+            };
+            log(`Task progress: taskId=${msg.task_id}, toolUseId=${msg.tool_use_id}, lastTool=${msg.last_tool_name}`);
+            messages.push({
+                type: 'task_progress',
+                content: msg.summary || msg.description || '',
+                taskId: msg.task_id || '',
+                toolUseId: msg.tool_use_id,
+                lastToolName: msg.last_tool_name,
+                summary: msg.summary,
+                usage: msg.usage,
             });
         }
         // Generic system messages
@@ -192,7 +289,8 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
             messages.push({
                 type: 'system',
                 content: '',
-                metadata: jsonData as unknown as Record<string, unknown>
+                subtype: jsonData.subtype || '',
+                metadata: jsonData as unknown as Record<string, unknown>,
             });
         }
     } else if (jsonData.type === 'tool_progress') {
@@ -200,21 +298,16 @@ export function convertToClaudeMessages(jsonData: SDKMessage): ClaudeMessage[] {
         messages.push({
             type: 'tool_progress',
             content: `${jsonData.tool_name}: ${jsonData.elapsed_time_seconds}s`,
-            metadata: {
-                toolUseId: jsonData.tool_use_id,
-                toolName: jsonData.tool_name,
-                elapsedSeconds: jsonData.elapsed_time_seconds,
-            }
+            toolUseId: jsonData.tool_use_id,
+            toolName: jsonData.tool_name,
+            elapsedSeconds: jsonData.elapsed_time_seconds,
         });
     } else if (jsonData.type === 'tool_use_summary') {
         log.debug(`Tool summary: ${(jsonData.summary || '').slice(0, 100)}... (${jsonData.preceding_tool_use_ids?.length ?? 0} tool uses)`);
         messages.push({
             type: 'tool_summary',
             content: jsonData.summary || '',
-            metadata: {
-                summary: jsonData.summary,
-                toolUseIds: jsonData.preceding_tool_use_ids,
-            }
+            toolUseIds: jsonData.preceding_tool_use_ids,
         });
     } else {
         log.warn(`Unknown SDK message type: ${jsonData.type}`);

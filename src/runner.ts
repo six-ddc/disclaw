@@ -18,6 +18,9 @@ import { createLogger } from './logger.js';
 
 export type DisplayMode = 'verbose' | 'simple' | 'pager';
 
+/** Message types that bypass the pager and go directly to Discord as embeds */
+const PAGER_BYPASS_TYPES = new Set(['system']);
+
 export interface ClaudeJob {
     prompt: string | MultimodalPrompt;
     threadId: string;
@@ -222,8 +225,8 @@ class JobRunner {
                             await sender([{
                                 type: 'system',
                                 content: '',
+                                subtype: 'new_session',
                                 metadata: {
-                                    subtype: 'new_session',
                                     label,
                                     model: initModel,
                                     cwd: initCwd,
@@ -252,15 +255,23 @@ class JobRunner {
                             }
                         }
                     } else if (displayMode === 'pager') {
-                        // Track raw user/assistant messages for offset calculation in phase 2
-                        pager!.trackRawMessage(sdkMessage);
-                        const messages = convertToClaudeMessages(sdkMessage);
-                        for (const msg of messages) {
-                            if (msg.type === 'system') {
-                                await sender([msg]);
-                            } else {
-                                pager!.handleMessage(msg);
+                        // Skip subagent-internal messages — they have parent_tool_use_id set.
+                        // Task lifecycle events (task_started etc.) don't have this field and are kept.
+                        const parentId = (sdkMessage as Record<string, unknown>).parent_tool_use_id;
+                        log.debug(`Pager routing: sdk.type=${sdkMessage.type} sdk.subtype=${(sdkMessage as Record<string,unknown>).subtype} parent_tool_use_id=${parentId ?? 'null'}`);
+                        if (!parentId) {
+                            // Track raw user/assistant messages for offset calculation in phase 2
+                            pager!.trackRawMessage(sdkMessage);
+                            const messages = convertToClaudeMessages(sdkMessage);
+                            for (const msg of messages) {
+                                if (PAGER_BYPASS_TYPES.has(msg.type)) {
+                                    await sender([msg]);
+                                } else {
+                                    pager!.handleMessage(msg);
+                                }
                             }
+                        } else {
+                            log.debug(`Skipped subagent message: type=${sdkMessage.type} parent_tool_use_id=${parentId}`);
                         }
                     }
                     } catch (err) {

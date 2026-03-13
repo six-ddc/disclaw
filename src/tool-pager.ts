@@ -16,6 +16,10 @@ import type { ButtonInteraction } from 'discord.js';
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import { getThreadMapping, savePagerMessage, getPagerMessage } from './db.js';
+import {
+    escapeCodeBlock, formatToolName, truncateContent,
+    buildToolUseEmbed, buildToolResultField, TOOL_RESULT_COLOR, TOOL_DONE_COLOR,
+} from './tool-embeds.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('pager');
@@ -24,15 +28,17 @@ const log = createLogger('pager');
 // Types
 // =========================================================================
 
-type PageKind = 'tool' | 'thinking' | 'text';
+type PageKind = 'tool' | 'thinking' | 'text' | 'task' | 'alert';
 
 interface PagerPage {
     kind: PageKind;
-    /** Display label: tool name, "Thinking", or "Assistant" */
+    /** Display label for non-tool pages: "Thinking", "Assistant" */
     label: string;
-    /** Primary content (input preview for tools, thinking text, assistant text) */
-    content: string;
-    /** Secondary content (tool result) — only for tool pages */
+    /** For tool/task/alert pages: pre-built embed (title, color, fields) */
+    toolEmbed?: EmbedData;
+    /** For non-tool pages: text content rendered as embed description */
+    content?: string;
+    /** Tool result content string (composed into embed on render) */
     result?: string;
     status: 'running' | 'done';
 }
@@ -46,70 +52,73 @@ export interface ToolPager {
 }
 
 // =========================================================================
-// Shared rendering
+// Pager-specific helpers
 // =========================================================================
 
-/** Format tool name: mcp__server__tool → server/tool */
-function formatToolName(name: string): string {
-    if (name.startsWith('mcp__')) {
-        return name.slice(5).split('__').join('/');
-    }
-    return name;
-}
-
-/** Truncate content for pager display */
+/** Truncate content for pager display (wraps shared truncateContent) */
 function truncatePreview(content: string, maxLines = 10, maxChars = 800): string {
-    const lines = content.split('\n');
-    const truncated = lines.slice(0, maxLines).join('\n');
-    const result = truncated.length > maxChars
-        ? truncateCodePoints(truncated, maxChars)
-        : truncated;
-    const remaining = lines.length - maxLines;
-    return remaining > 0 ? `${result}\n(+${remaining} more lines)` : result;
+    const { preview, isTruncated, totalLines } = truncateContent(content, maxLines, maxChars);
+    const remaining = totalLines - maxLines;
+    return isTruncated && remaining > 0 ? `${preview}\n(+${remaining} more lines)` : preview;
 }
 
-const PAGE_COLORS: Record<PageKind, { active: number; done: number }> = {
-    tool:     { active: 0x0099ff, done: 0x00ffff },
-    thinking: { active: 0x9b59b6, done: 0x9b59b6 },
-    text:     { active: 0x2ecc71, done: 0x2ecc71 },
+/** Strip system-reminder tags and normalize whitespace */
+function cleanContent(text: string): string {
+    return text
+        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+        .replace(/\n\s*\n\s*\n/g, '\n\n');
+}
+
+// =========================================================================
+// Page rendering (shared by Phase 1 and Phase 2)
+// =========================================================================
+
+/** Colors for page kinds that don't carry their own embed (thinking/text only) */
+const PAGE_COLORS: Partial<Record<PageKind, number>> = {
+    thinking: 0x9b59b6,
+    text:     0x2ecc71,
 };
 
-const PAGE_ICONS: Record<PageKind, string> = {
-    tool: '🔧',
+const PAGE_ICONS: Partial<Record<PageKind, string>> = {
     thinking: '💭',
     text: '💬',
 };
 
 function buildPageEmbed(page: PagerPage, pageIdx: number, total: number): EmbedData {
-    const icon = PAGE_ICONS[page.kind];
-    const statusIcon = page.status === 'running' ? '⏳' : '✅';
-    const colors = PAGE_COLORS[page.kind];
+    if (page.toolEmbed) {
+        // Clone the base embed and append pagination
+        const embed: EmbedData = {
+            ...page.toolEmbed,
+            fields: page.toolEmbed.fields ? [...page.toolEmbed.fields] : [],
+        };
 
-    let description: string;
+        // Tool pages: append result field and update color
+        if (page.kind === 'tool') {
+            if (page.result) {
+                const r = buildToolResultField(page.result);
+                embed.fields!.push(r.field);
+            } else if (page.status === 'done') {
+                const r = buildToolResultField('');
+                embed.fields!.push(r.field);
+            }
+            if (page.status === 'done') {
+                embed.color = page.result ? TOOL_RESULT_COLOR : TOOL_DONE_COLOR;
+            }
+        }
 
-    if (page.kind === 'tool') {
-        description = `**${statusIcon} \`${page.label}\`**\n`;
-        if (page.content) {
-            description += `\`\`\`json\n${page.content}\n\`\`\`\n`;
-        }
-        if (page.result) {
-            description += `**Result:**\n\`\`\`\n${page.result}\n\`\`\``;
-        } else if (page.status === 'done' && !page.result) {
-            description += '*Done (empty result)*';
-        }
-    } else if (page.kind === 'thinking') {
-        description = page.content;
-    } else {
-        // text
-        description = page.content;
+        embed.title = `${embed.title} (${pageIdx + 1}/${total})`;
+        return embed;
     }
 
+    // Thinking / text pages — simple description embed
+    const icon = PAGE_ICONS[page.kind] ?? '📋';
+    let description = page.content || '';
     if (description.length > 4000) {
         description = truncateCodePoints(description, 4000);
     }
 
     return {
-        color: page.status === 'done' ? colors.done : colors.active,
+        color: PAGE_COLORS[page.kind] ?? 0x0099ff,
         title: `${icon} ${page.label} (${pageIdx + 1}/${total})`,
         description,
     };
@@ -176,6 +185,8 @@ interface LivePagerState {
     currentPage: number;
     /** Map toolUseId → page index for merging tool_result */
     toolUseIdToPage: Map<string, number>;
+    /** Map taskId → page index for merging task_progress/task_notification */
+    taskIdToPage: Map<string, number>;
     updateTimer: ReturnType<typeof setTimeout> | null;
     pendingUpdate: boolean;
     flushing: Promise<void> | null;
@@ -250,13 +261,6 @@ function scheduleUpdate(state: LivePagerState): void {
 // Phase 2: SDK-backed query for persistent buttons
 // =========================================================================
 
-/** Strip system-reminder tags and normalize whitespace */
-function cleanContent(text: string): string {
-    return text
-        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-        .replace(/\n\s*\n\s*\n/g, '\n\n');
-}
-
 /** Parse all displayable pages from raw session messages */
 function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }>): PagerPage[] {
     const pages: PagerPage[] = [];
@@ -291,12 +295,13 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
                     });
                 }
             } else if (block.type === 'tool_use') {
-                const inputStr = block.input ? JSON.stringify(block.input, null, 2) : '';
+                const toolName = block.name || 'Unknown';
+                const toolInput = (block.input || {}) as Record<string, unknown>;
                 const pageIdx = pages.length;
                 pages.push({
                     kind: 'tool',
-                    label: formatToolName(block.name || 'Unknown'),
-                    content: truncatePreview(inputStr, 8, 600),
+                    label: formatToolName(toolName),
+                    toolEmbed: buildToolUseEmbed(toolName, toolInput),
                     status: 'done',
                 });
                 if (block.id) {
@@ -394,6 +399,7 @@ export function createToolPager(threadId: string): ToolPager {
         pages: [],
         currentPage: 0,
         toolUseIdToPage: new Map(),
+        taskIdToPage: new Map(),
         updateTimer: null,
         pendingUpdate: false,
         flushing: null,
@@ -419,16 +425,13 @@ export function createToolPager(threadId: string): ToolPager {
 
             switch (msg.type) {
                 case 'tool_use': {
-                    const toolName = (msg.metadata?.name as string) || 'Unknown';
-                    const toolUseId = (msg.metadata?.toolUseId as string) || '';
-                    const toolInput = msg.metadata?.input as Record<string, unknown> | undefined;
-                    const inputStr = toolInput ? JSON.stringify(toolInput, null, 2) : '';
+                    const { name: toolName, toolUseId, input: toolInput } = msg;
 
                     const pageIdx = state.pages.length;
                     state.pages.push({
                         kind: 'tool',
                         label: formatToolName(toolName),
-                        content: truncatePreview(inputStr, 8, 600),
+                        toolEmbed: buildToolUseEmbed(toolName, toolInput),
                         status: 'running',
                     });
                     if (toolUseId) {
@@ -440,7 +443,7 @@ export function createToolPager(threadId: string): ToolPager {
                     break;
                 }
                 case 'tool_result': {
-                    const toolUseId = (msg.metadata?.toolUseId as string) || '';
+                    const { toolUseId } = msg;
                     const pageIdx = toolUseId ? state.toolUseIdToPage.get(toolUseId) : undefined;
                     const page = pageIdx !== undefined ? state.pages[pageIdx] : undefined;
                     if (page) {
@@ -480,7 +483,93 @@ export function createToolPager(threadId: string): ToolPager {
                 }
                 case 'tool_progress':
                 case 'tool_summary': {
-                    // Just trigger re-render for progress updates
+                    scheduleUpdate(state);
+                    break;
+                }
+
+                case 'task_started': {
+                    // Link taskId → Agent tool page (don't create a separate page)
+                    const { taskId, toolUseId } = msg;
+                    const pageIdx = toolUseId ? state.toolUseIdToPage.get(toolUseId) : undefined;
+                    if (taskId && pageIdx !== undefined) {
+                        state.taskIdToPage.set(taskId, pageIdx);
+                        log(`[${id}] task_started: linked taskId=${taskId} → page=${pageIdx} (Agent toolUseId=${toolUseId})`);
+                    } else {
+                        log.warn(`[${id}] task_started: no Agent page found for toolUseId=${toolUseId}, taskId=${taskId}`);
+                    }
+                    break;
+                }
+
+                case 'task_progress': {
+                    const { taskId, toolUseId, summary, lastToolName, usage } = msg;
+                    // Resolve page: prefer taskId map, fall back to toolUseId
+                    const pageIdx = (taskId ? state.taskIdToPage.get(taskId) : undefined)
+                        ?? (toolUseId ? state.toolUseIdToPage.get(toolUseId) : undefined);
+                    const page = pageIdx !== undefined ? state.pages[pageIdx] : undefined;
+
+                    if (page?.toolEmbed) {
+                        let desc = summary || msg.content || '';
+                        const parts: string[] = [];
+                        if (lastToolName) parts.push(`Last tool: \`${formatToolName(lastToolName)}\``);
+                        if (usage?.duration_ms) parts.push(`${(usage.duration_ms / 1000).toFixed(1)}s`);
+                        if (usage?.tool_uses) parts.push(`${usage.tool_uses} tool calls`);
+                        if (parts.length > 0) desc += `\n*${parts.join(' · ')}*`;
+                        page.toolEmbed.description = truncateCodePoints(desc, 2000);
+                        log.debug(`[${id}] task_progress updated page=${pageIdx} taskId=${taskId}`);
+                        scheduleUpdate(state);
+                    }
+                    break;
+                }
+
+                case 'task_notification': {
+                    const { taskId, toolUseId, status, summary, usage } = msg;
+                    const pageIdx = (taskId ? state.taskIdToPage.get(taskId) : undefined)
+                        ?? (toolUseId ? state.toolUseIdToPage.get(toolUseId) : undefined);
+                    const page = pageIdx !== undefined ? state.pages[pageIdx] : undefined;
+
+                    if (page?.toolEmbed) {
+                        // Add usage as a compact description suffix
+                        const parts: string[] = [];
+                        if (usage?.duration_ms) parts.push(`${(usage.duration_ms / 1000).toFixed(1)}s`);
+                        if (usage?.tool_uses) parts.push(`${usage.tool_uses} tool calls`);
+                        if (usage?.total_tokens) parts.push(`${usage.total_tokens.toLocaleString()} tokens`);
+                        const usageLine = parts.length > 0 ? `\n*${parts.join(' · ')}*` : '';
+
+                        if (status === 'completed') {
+                            page.toolEmbed.description = (summary || '') + usageLine;
+                        } else {
+                            const statusEmoji = status === 'failed' ? '❌' : '⏹️';
+                            page.toolEmbed.description = `${statusEmoji} ${status}: ${summary || msg.content || 'No details'}${usageLine}`;
+                        }
+                        log(`[${id}] task_notification merged into page=${pageIdx} taskId=${taskId} status=${status}`);
+                    } else {
+                        log.warn(`[${id}] task_notification: no page found for taskId=${taskId} toolUseId=${toolUseId}`);
+                    }
+                    scheduleUpdate(state);
+                    break;
+                }
+
+                case 'permission_denied': {
+                    const { toolName, toolInput } = msg;
+                    const inputPreview = JSON.stringify(toolInput, null, 2);
+                    const { preview } = truncateContent(inputPreview, 6, 500);
+
+                    state.pages.push({
+                        kind: 'alert',
+                        label: 'Permission Denied',
+                        toolEmbed: {
+                            color: 0xff4444,
+                            title: `🚫 Permission Denied: \`${formatToolName(toolName)}\``,
+                            description: 'Tool blocked by current permission mode.',
+                            fields: [
+                                { name: 'Tool', value: `\`${toolName}\``, inline: true },
+                                { name: 'Input', value: `\`\`\`json\n${escapeCodeBlock(preview)}\n\`\`\``, inline: false },
+                            ],
+                        },
+                        status: 'done',
+                    });
+                    state.currentPage = state.pages.length - 1;
+                    log.debug(`[${id}] +permission_denied page=${state.currentPage} tool=${toolName}`);
                     scheduleUpdate(state);
                     break;
                 }
@@ -585,6 +674,7 @@ export function createToolPager(threadId: string): ToolPager {
                 activePagers.delete(id);
                 state.pages.length = 0;
                 state.toolUseIdToPage.clear();
+                state.taskIdToPage.clear();
             } catch (e) {
                 log.error(`[${id}] Failed to finalize, keeping Phase 1 buttons alive: ${e}`);
                 // Don't delete from activePagers — Phase 1 buttons remain functional

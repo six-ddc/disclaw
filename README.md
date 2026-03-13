@@ -16,6 +16,10 @@ A Discord harness for Claude Code. Thread-based AI conversations with rich inter
 - Multimodal input: images (PNG/JPEG/GIF/WebP), PDFs, text file attachments, and reply references are sent to Claude as content blocks
 
 ### Rich Message Rendering
+- **Display modes** — configurable per-thread via `/disclaw config`:
+  - `verbose` — All tool calls shown as rich embeds in real-time
+  - `simple` — Only final text replies, tool calls and thinking hidden
+  - `pager` — Tool calls collected in a single navigable embed with page buttons
 - Claude's text output renders as full Discord markdown (code blocks, lists, etc.)
 - Tool calls displayed as colored embeds with input preview and result
 - Thinking blocks shown in purple embeds
@@ -24,17 +28,24 @@ A Discord harness for Claude Code. Thread-based AI conversations with rich inter
 - Completion stats: model name, context usage %, response time
 - Session change notifications: "New session", "Forked session", "Resumed session" embeds with model and working directory
 
+### Discord Media Tools
+Claude can send files directly to Discord threads via built-in MCP tools:
+- `discord_send_image` — Images as rich embed previews (PNG, JPG, GIF, WebP, AVIF)
+- `discord_send_media` — Audio/video with inline player (MP3, WAV, OGG, MP4, WebM)
+- `discord_send_file` — Downloadable attachments (PDF, MD, ZIP, CSV, code files)
+
+All files validated with extension whitelist and 25MB Discord size limit.
+
 ### Slash Commands (`/disclaw`)
 | Command | Description |
 |---------|-------------|
 | `cd` | Change working directory (channel default or thread override) |
 | `clear` | Clear context and start a fresh session |
 | `interrupt` | Stop the current Claude processing |
-| `model` | Switch Claude model |
+| `config` | Configure model, permission mode, and display mode via modal |
 | `fork` | Fork conversation into a new thread |
 | `resume` | Resume a previous session |
 | `cron` | List all scheduled tasks |
-| `permission` | Set permission mode (default, dontAsk, acceptEdits, bypassPermissions, plan) |
 
 ### Scheduled Tasks (Cron)
 Claude can create recurring tasks that run on a cron schedule. Each task gets its own dedicated thread with a control panel:
@@ -105,8 +116,11 @@ Discord Gateway → Bot (bot.ts)
                     │           ├── message-converter.ts → ClaudeMessage[]
                     │           └── discord-sender.ts → Discord embeds
                     ├── Cron scheduler → cron.ts (croner)
-                    │     └── MCP server (cron_create, cron_list, cron_delete, cron_update, title_generate)
-                    └── SQLite (db.ts) — thread/session mappings, channel configs, cron jobs
+                    ├── MCP server → mcp-server.ts
+                    │     ├── Cron tools (cron_create, cron_list, cron_delete, cron_update)
+                    │     ├── Thread tools (title_generate)
+                    │     └── Media tools (discord_send_image, discord_send_media, discord_send_file)
+                    └── SQLite (db.ts) — thread/session mappings, channel configs, cron jobs, pager messages
 ```
 
 Single process. No Redis, no queue, no HTTP server. The runner uses an async semaphore for concurrency control (default: 2 concurrent jobs) with retry and exponential backoff.
@@ -120,6 +134,7 @@ Single process. No Redis, no queue, no HTTP server. The runner uses an async sem
 | `DISCLAW_ALLOWED_DIRS` | No | — | Comma-separated directory allowlist |
 | `DB_PATH` | No | `./data/threads.db` | SQLite database path |
 | `DISCLAW_PERMISSION_MODE` | No | `default` | Default permission mode (`default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`) |
+| `SHOW_LINK_PREVIEWS` | No | — | Show URL embeds in bot messages |
 | `TZ` | No | system | Timezone for cron schedules and datetime display |
 
 ## Privacy
