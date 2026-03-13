@@ -359,6 +359,29 @@ async function renderPersistentPage(
 }
 
 // =========================================================================
+// Per-thread last pager tracking (like scheduleStatusDelete in discord-sender)
+// When a new pager appears, immediately strip buttons from the previous one.
+// On finalize, keep buttons for 30s then auto-strip.
+// =========================================================================
+
+const lastPagerMessage = new Map<string, { messageId: string; threadId: string; timer: ReturnType<typeof setTimeout> }>();
+
+function schedulePagerButtonRemoval(threadId: string, messageId: string): void {
+    // Immediately strip buttons from previous pager in this thread
+    const prev = lastPagerMessage.get(threadId);
+    if (prev) {
+        clearTimeout(prev.timer);
+        editRichMessage(prev.threadId, prev.messageId, { components: [] }).catch(() => {});
+    }
+    // Auto-strip buttons from this pager after 30s
+    const timer = setTimeout(() => {
+        lastPagerMessage.delete(threadId);
+        editRichMessage(threadId, messageId, { components: [] }).catch(() => {});
+    }, 30_000);
+    lastPagerMessage.set(threadId, { messageId, threadId, timer });
+}
+
+// =========================================================================
 // Public API
 // =========================================================================
 
@@ -539,16 +562,23 @@ export function createToolPager(threadId: string): ToolPager {
                 log(`[${id}] Parsed ${total} pages from round (Phase 1 had ${state.pages.length}), showing page ${pageIdx}`);
 
                 if (total > 0) {
-                    // Show last page without buttons — users can react to restore navigation
+                    // Show last page with persistent buttons — auto-strip after 30s
                     const lastIdx = total - 1;
                     const embed = buildPageEmbed(pages[lastIdx]!, lastIdx, total);
+                    const row = total > 1
+                        ? buildPersistentButtons(sessionId, lastIdx, total, msgOffset, msgLimit)
+                        : null;
                     await editRichMessage(state.threadId, state.messageId, {
                         embeds: [embed],
-                        components: [],
+                        components: row ? [row] : [],
                     });
                     // Save metadata to DB for reaction-triggered restore
                     savePagerMessage(state.messageId, state.threadId, sessionId, msgOffset, msgLimit, workingDir);
-                    log(`[${id}] Finalized (no buttons): session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, pages=${total}`);
+                    // Schedule button removal (30s) — or immediately if next pager appears
+                    if (row) {
+                        schedulePagerButtonRemoval(state.threadId, state.messageId);
+                    }
+                    log(`[${id}] Finalized (buttons, 30s auto-strip): session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, pages=${total}`);
                 }
 
                 // Free memory only after successful finalization

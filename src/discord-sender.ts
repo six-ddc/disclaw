@@ -168,11 +168,11 @@ function scheduleStatusDelete(threadId: string, messageId: string) {
         clearTimeout(prev.timer);
         deleteMessage(threadId, prev.messageId).catch(() => {});
     }
-    // Auto-delete this one after 1 minute
+    // Auto-delete this one after 30s
     const timer = setTimeout(() => {
         lastStatusMessage.delete(threadId);
         deleteMessage(threadId, messageId).catch(() => {});
-    }, 60_000);
+    }, 30_000);
     lastStatusMessage.set(threadId, { messageId, timer });
 }
 
