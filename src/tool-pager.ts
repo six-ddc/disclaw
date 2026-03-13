@@ -106,7 +106,7 @@ function buildPageEmbed(page: PagerPage, pageIdx: number, total: number): EmbedD
             }
         }
 
-        embed.title = `${embed.title} (${pageIdx + 1}/${total})`;
+        // title unchanged — page number shown in navigation buttons only
         return embed;
     }
 
@@ -119,7 +119,7 @@ function buildPageEmbed(page: PagerPage, pageIdx: number, total: number): EmbedD
 
     return {
         color: PAGE_COLORS[page.kind] ?? 0x0099ff,
-        title: `${icon} ${page.label} (${pageIdx + 1}/${total})`,
+        title: `${icon} ${page.label}`,
         description,
     };
 }
