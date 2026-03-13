@@ -141,6 +141,16 @@ export class CronScheduler {
             description: `**Scheduled Run** · ${timeStr}`,
         }]).catch(err => log.error(`Failed to send separator for job ${jobId}: ${err}`));
 
+        // Resolve parent channel for status message updates
+        // Thread ID === starter message ID (Discord creates threads from messages)
+        let parentChannelId: string | undefined;
+        try {
+            const thread = await this.client.channels.fetch(job.thread_id);
+            parentChannelId = thread?.isThread() ? thread.parentId || undefined : undefined;
+        } catch (err) {
+            log.warn(`Failed to fetch thread ${job.thread_id} for parent channel: ${err}`);
+        }
+
         // Submit to runner (no sessionId — SDK auto-generates; persistSession: false to avoid filesystem clutter)
         runner.submit({
             prompt: job.prompt,
@@ -152,6 +162,8 @@ export class CronScheduler {
             username: 'cron',
             workingDir,
             model: mapping?.model || undefined,
+            parentChannelId,
+            statusMessageId: parentChannelId ? job.thread_id : undefined,
             onComplete: (error) => {
                 if (error) {
                     const count = (this.failures.get(jobId) || 0) + 1;

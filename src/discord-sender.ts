@@ -59,7 +59,7 @@ function truncateContent(content: string, maxLines = 15, maxChars = 1000): { pre
     const truncatedLines = lines.slice(0, maxLines);
     const preview = truncatedLines.join('\n');
 
-    if ([...preview].length > maxChars) {
+    if (preview.length > maxChars) {
         return {
             preview: truncateCodePoints(preview, maxChars),
             isTruncated: true,

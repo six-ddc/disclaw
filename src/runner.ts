@@ -288,7 +288,7 @@ class JobRunner {
 
             // Update channel status message with the final reply
             if (job.statusMessageId && job.parentChannelId && lastResultText) {
-                const statusText = truncateCodePoints(lastResultText, 2000);
+                const statusText = truncateCodePoints(lastResultText, 1900);
                 await editMessage(job.parentChannelId, job.statusMessageId, statusText).catch(err => {
                     log.warn(`Failed to update status message for thread=${job.threadId}: ${err}`);
                 });

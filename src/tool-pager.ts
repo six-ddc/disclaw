@@ -61,7 +61,7 @@ function formatToolName(name: string): string {
 function truncatePreview(content: string, maxLines = 10, maxChars = 800): string {
     const lines = content.split('\n');
     const truncated = lines.slice(0, maxLines).join('\n');
-    const result = [...truncated].length > maxChars
+    const result = truncated.length > maxChars
         ? truncateCodePoints(truncated, maxChars)
         : truncated;
     const remaining = lines.length - maxLines;
@@ -104,7 +104,7 @@ function buildPageEmbed(page: PagerPage, pageIdx: number, total: number): EmbedD
         description = page.content;
     }
 
-    if ([...description].length > 4000) {
+    if (description.length > 4000) {
         description = truncateCodePoints(description, 4000);
     }
 

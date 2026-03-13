@@ -105,6 +105,7 @@ try {
     db.run(`ALTER TABLE cron_jobs ADD COLUMN last_run_at TEXT`);
 } catch {} // Column may already exist
 
+
 // Create pager_messages table — stores pager embed metadata for reaction-triggered restore
 db.run(`
     CREATE TABLE IF NOT EXISTS pager_messages (

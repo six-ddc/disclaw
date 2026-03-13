@@ -62,9 +62,17 @@ async function getChannel(channelId: string): Promise<TextChannel> {
  * Appends a suffix (default "...") when truncated.
  */
 export function truncateCodePoints(text: string, max: number, suffix = '...'): string {
-    const codePoints = [...text];
-    if (codePoints.length <= max) return text;
-    return codePoints.slice(0, max - suffix.length).join('') + suffix;
+    if (text.length <= max) return text;
+    // Truncate by UTF-16 length (what Discord counts) while avoiding
+    // splitting surrogate pairs (chars outside BMP like emoji)
+    const limit = max - suffix.length;
+    let end = limit;
+    // If we'd split a surrogate pair, step back one unit
+    if (end > 0 && end < text.length) {
+        const code = text.charCodeAt(end - 1);
+        if (code >= 0xD800 && code <= 0xDBFF) end--;
+    }
+    return text.slice(0, end) + suffix;
 }
 
 /**
@@ -349,13 +357,24 @@ export async function editEmbed(channelId: string, messageId: string, embeds: Em
 }
 
 /**
- * Edit a message in a channel/thread
+ * Edit a message in a channel/thread.
+ * Applies the same content processing as sendToThread (table flattening, URL wrapping).
  */
 export async function editMessage(channelId: string, messageId: string, content: string): Promise<void> {
+    if (!content.trim()) {
+        log.debug(`Skipping empty edit for message ${messageId} in ${channelId}`);
+        return;
+    }
     const channel = await getChannel(channelId);
     const message = await channel.messages.fetch(messageId);
-    await message.edit(content);
-    log.debug(`Message edited (channelId=${channelId}, messageId=${messageId}, ${content.length} chars)`);
+    let processed = flattenTables(content);
+    if (suppressLinkPreviews) processed = wrapUrls(processed);
+    // Ensure content stays within Discord's 2000-char limit after processing
+    if (processed.length > 2000) {
+        processed = truncateCodePoints(processed, 2000);
+    }
+    await message.edit(processed);
+    log.debug(`Message edited (channelId=${channelId}, messageId=${messageId}, ${processed.length} chars)`);
 }
 
 /**

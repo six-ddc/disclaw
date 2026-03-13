@@ -367,11 +367,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
             autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
         });
 
-        const originalMessages = await message.channel.messages.fetch({ limit: 10 });
-        const userMessage = originalMessages.find(m => m.id === message.id);
-        if (userMessage) {
-            await thread.send(`**${message.author.tag}:** ${cleanedMessage}`);
-        }
     } catch (error) {
         log.error(`Failed to create thread: channel=${message.channelId} user=${message.author.tag} error=${error}`);
         await message.reply('Failed to start thread. Try again?');
