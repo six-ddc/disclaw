@@ -13,7 +13,7 @@
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeMessage } from './message-converter.js';
 import type { ButtonInteraction } from 'discord.js';
-import { sendRichMessage, editRichMessage, truncateCodePoints, buildPaginationRow, type EmbedData } from './discord.js';
+import { sendRichMessage, editRichMessage, truncateCodePoints, buildPaginationRow, splitMarkdown, type EmbedData } from './discord.js';
 import { getThreadMapping, savePagerMessage, getPagerMessage } from './db.js';
 import {
     escapeCodeBlock, formatToolName, truncateContent, cleanContent,
@@ -246,12 +246,15 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
             } else if (block.type === 'text' && block.text && raw.type === 'assistant') {
                 const text = String(block.text).trim();
                 if (text) {
-                    pages.push({
-                        kind: 'text',
-                        label: 'Assistant',
-                        content: truncatePreview(text, Infinity, 3800),
-                        status: 'done',
-                    });
+                    const chunks = splitMarkdown(text, 3800);
+                    for (const chunk of chunks) {
+                        pages.push({
+                            kind: 'text',
+                            label: 'Assistant',
+                            content: chunk,
+                            status: 'done',
+                        });
+                    }
                 }
             } else if (block.type === 'tool_use') {
                 const toolName = block.name || 'Unknown';
@@ -428,12 +431,15 @@ export function createToolPager(threadId: string): ToolPager {
                 case 'text': {
                     const text = msg.content.trim();
                     if (text) {
-                        state.pages.push({
-                            kind: 'text',
-                            label: 'Assistant',
-                            content: truncatePreview(text, Infinity, 3800),
-                            status: 'done',
-                        });
+                        const chunks = splitMarkdown(text, 3800);
+                        for (const chunk of chunks) {
+                            state.pages.push({
+                                kind: 'text',
+                                label: 'Assistant',
+                                content: chunk,
+                                status: 'done',
+                            });
+                        }
                         state.currentPage = state.pages.length - 1;
                         log.debug(`[${id}] +text page=${state.currentPage}`);
                         scheduleUpdate(state);

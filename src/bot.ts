@@ -39,6 +39,7 @@ import { createDisclawMcpServer } from './mcp-server.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
 import { extractMessageContent } from './attachment-handler.js';
+import { buildPrompt } from './context-builder.js';
 import { createLogger } from './logger.js';
 import { parseWorkingDirFromMessage, resolveWorkingDirWithMapping } from './working-dir.js';
 
@@ -237,9 +238,9 @@ client.on(Events.MessageCreate, async (message: Message) => {
             log.debug(`Sending typing indicator: thread=${thread.id}`);
             await thread.sendTyping();
 
-            // Extract multimodal content (images, files, replies)
-            log.debug(`Extracting multimodal content: thread=${thread.id} attachments=${message.attachments.size}`);
-            const multimodalPrompt = await extractMessageContent(message);
+            // Build XML-formatted prompt (no context for tracked threads)
+            log.debug(`Building prompt: thread=${thread.id} attachments=${message.attachments.size}`);
+            const multimodalPrompt = await buildPrompt({ message, includeContext: false });
             const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
             // Use stored working dir or fall back to channel config / env / cwd
@@ -306,9 +307,13 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
     log(`Working directory resolved: ${workingDir} channel=${channelId}`);
 
-    // Extract multimodal content (images, files, replies) using the cleaned text
-    log.debug(`Extracting multimodal content: channel=${channelId} attachments=${message.attachments.size}`);
-    const multimodalPrompt = await extractMessageContent(message, cleanedMessage);
+    // Build XML-formatted prompt (include context when adopting existing thread)
+    log.debug(`Building prompt: channel=${channelId} attachments=${message.attachments.size} includeContext=${!!existingThread}`);
+    const multimodalPrompt = await buildPrompt({
+        message,
+        overrideText: cleanedMessage,
+        includeContext: !!existingThread,
+    });
     const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
     let thread;
@@ -319,8 +324,9 @@ client.on(Events.MessageCreate, async (message: Message) => {
         thread = existingThread;
         statusMessageId = message.id;
     } else {
-        // Create a new thread from a status message in the channel
-        const displayText = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt.textSummary;
+        // For thread naming, get a plain text summary (not XML)
+        const namingPrompt = await extractMessageContent(message, cleanedMessage);
+        const displayText = namingPrompt.type === 'text' ? namingPrompt.text : namingPrompt.textSummary;
         try {
             const statusMessage = await (message.channel as TextChannel).send('Processing...');
             const threadName = truncateCodePoints(displayText || 'New conversation', 50);

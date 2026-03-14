@@ -63,7 +63,7 @@ function detectImageMediaType(buffer: Buffer, declaredType: string): string {
 
 type AttachmentKind = 'image' | 'pdf' | 'text' | 'unsupported';
 
-function classifyAttachment(attachment: Attachment): AttachmentKind {
+export function classifyAttachment(attachment: Attachment): AttachmentKind {
     const contentType = attachment.contentType?.toLowerCase() || '';
 
     if (SUPPORTED_IMAGE_TYPES.has(contentType)) {
@@ -139,7 +139,7 @@ function buildTextFileBlock(buffer: Buffer, filename: string): TextBlock {
     };
 }
 
-async function processAttachments(attachments: Attachment[]): Promise<ContentBlock[]> {
+export async function processAttachments(attachments: Attachment[]): Promise<ContentBlock[]> {
     const blocks: ContentBlock[] = [];
     let imageCount = 0;
 
@@ -193,7 +193,7 @@ async function processAttachments(attachments: Attachment[]): Promise<ContentBlo
     return blocks;
 }
 
-async function fetchReplyContext(message: Message): Promise<ContentBlock[]> {
+export async function fetchReplyContext(message: Message): Promise<ContentBlock[]> {
     if (!message.reference?.messageId) return [];
 
     log.debug(`Fetching reply context for messageId=${message.reference.messageId}`);
