@@ -12,7 +12,7 @@ import { sendToThread, editMessage, renameThread, truncateCodePoints, addReactio
 import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { getThreadMapping, resolveSessionState, updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
 import { createCanUseTool, cleanupThread } from './user-input.js';
-import type { MultimodalPrompt } from './attachment-handler.js';
+import type { MultimodalPrompt, ContentBlock } from './attachment-handler.js';
 import { createToolPager } from './tool-pager.js';
 import type { DisplayMode, PermissionMode } from './types.js';
 import { createLogger } from './logger.js';
@@ -48,6 +48,10 @@ export interface ClaudeJob {
     eyesReaction?: { channelId: string; messageId: string };
     /** Called when the job completes (success or final failure) */
     onComplete?: (error?: Error) => void;
+    /** Additional eyes reactions from batched messages (for cleanup on completion) */
+    batchedEyesReactions?: { channelId: string; messageId: string }[];
+    /** Additional onComplete callbacks from batched messages */
+    batchedOnCompletes?: ((error?: Error) => void)[];
 }
 
 interface RunnerOptions {
@@ -57,6 +61,21 @@ interface RunnerOptions {
 }
 
 const log = createLogger('runner');
+
+/** Extract the XML text portion from a prompt */
+function extractPromptText(prompt: string | MultimodalPrompt): string {
+    if (typeof prompt === 'string') return prompt;
+    if (prompt.type === 'text') return prompt.text;
+    const textBlock = prompt.blocks.find(b => b.type === 'text');
+    return textBlock?.type === 'text' ? textBlock.text : '';
+}
+
+/** Extract binary content blocks (images, PDFs) from a prompt */
+function extractMediaBlocks(prompt: string | MultimodalPrompt): ContentBlock[] {
+    if (typeof prompt === 'string') return [];
+    if (prompt.type === 'text') return [];
+    return prompt.blocks.filter(b => b.type !== 'text');
+}
 
 class JobRunner {
     private active = 0;
@@ -73,7 +92,7 @@ class JobRunner {
     private threadQueues = new Map<string, ClaudeJob[]>();
 
     constructor(options: RunnerOptions = {}) {
-        this.concurrency = options.concurrency ?? 2;
+        this.concurrency = options.concurrency ?? 10;
         this.maxAttempts = options.maxAttempts ?? 3;
         this.backoffBaseMs = options.backoffBaseMs ?? 1000;
         log(`JobRunner initialized: concurrency=${this.concurrency}, maxAttempts=${this.maxAttempts}, backoffBaseMs=${this.backoffBaseMs}`);
@@ -116,14 +135,15 @@ class JobRunner {
             this.active--;
             log.debug(`Slot released for thread=${job.threadId}, active=${this.active}/${this.concurrency}`);
 
-            // Promote next per-thread job to global pending queue
+            // Promote all per-thread queued jobs as a single merged job
             const queue = this.threadQueues.get(job.threadId);
             if (queue && queue.length > 0) {
-                const next = queue.shift()!;
-                if (queue.length === 0) this.threadQueues.delete(job.threadId);
+                const allJobs = queue.splice(0);
+                this.threadQueues.delete(job.threadId);
+                const merged = this.mergeThreadJobs(allJobs);
                 // Keep runningThreads mark; prioritize by pushing to front
-                this.pending.unshift(next);
-                log.debug(`Promoted next thread-queued job for thread=${job.threadId} to global pending (remaining in thread queue: ${queue.length})`);
+                this.pending.unshift(merged);
+                log.debug(`Merged ${allJobs.length} queued jobs for thread=${job.threadId} into one`);
             } else {
                 this.runningThreads.delete(job.threadId);
                 log.debug(`Thread ${job.threadId} removed from runningThreads`);
@@ -286,6 +306,9 @@ class JobRunner {
             if (job.eyesReaction) {
                 removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
             }
+            for (const r of job.batchedEyesReactions || []) {
+                removeReaction(r.channelId, r.messageId, '👀').catch(() => {});
+            }
             // Finalize pager: remove buttons, save metadata to DB
             await pager?.destroy(resultSessionId, job.workingDir || process.cwd());
 
@@ -316,12 +339,16 @@ class JobRunner {
 
             log(`Job completed for ${job.username} thread=${job.threadId}, resultSessionId=${resultSessionId}`);
             job.onComplete?.();
+            for (const cb of job.batchedOnCompletes || []) cb();
         } catch (error) {
             this.activeQueries.delete(job.threadId);
             cleanupThread(job.threadId);
             // Remove eyes reaction on error too
             if (job.eyesReaction) {
                 removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
+            }
+            for (const r of job.batchedEyesReactions || []) {
+                removeReaction(r.channelId, r.messageId, '👀').catch(() => {});
             }
             await pager?.destroy(job.sessionId || '', job.workingDir || process.cwd());
 
@@ -345,7 +372,9 @@ class JobRunner {
             }
 
             log.error(`Job exhausted all ${this.maxAttempts} attempts for ${job.username} thread=${job.threadId}, giving up`);
-            job.onComplete?.(error instanceof Error ? error : new Error(String(error)));
+            const finalError = error instanceof Error ? error : new Error(String(error));
+            job.onComplete?.(finalError);
+            for (const cb of job.batchedOnCompletes || []) cb(finalError);
             await sendToThread(
                 job.threadId,
                 `Something went wrong. Try again?\n\`\`\`${error}\`\`\``
@@ -398,6 +427,65 @@ class JobRunner {
         } catch (err) {
             log.error(`Failed to generate title for thread=${threadId}: ${err}`);
         }
+    }
+
+    /**
+     * Merge multiple per-thread queued jobs into a single job.
+     * Concatenates XML message elements and combines media blocks.
+     */
+    private mergeThreadJobs(jobs: ClaudeJob[]): ClaudeJob {
+        if (jobs.length === 1) return jobs[0]!;
+
+        const base = jobs[0]!;
+        const rest = jobs.slice(1);
+
+        // Merge prompts: concatenate XML text, combine media blocks
+        const allMediaBlocks: ContentBlock[] = [];
+        let textSummary = '';
+
+        for (const job of jobs) {
+            allMediaBlocks.push(...extractMediaBlocks(job.prompt));
+            if (!textSummary && typeof job.prompt !== 'string' && job.prompt.type === 'multimodal') {
+                textSummary = job.prompt.textSummary;
+            }
+        }
+
+        const mergedText = jobs.map(j => extractPromptText(j.prompt)).filter(Boolean).join('\n\n');
+
+        let prompt: string | MultimodalPrompt;
+        if (allMediaBlocks.length > 0) {
+            prompt = {
+                type: 'multimodal',
+                blocks: [{ type: 'text', text: mergedText }, ...allMediaBlocks],
+                textSummary: textSummary || mergedText.slice(0, 200),
+            };
+        } else {
+            prompt = mergedText;
+        }
+
+        // Remove ⏳ from absorbed jobs (base's ⏳ is removed in executeWithRetry)
+        for (const job of rest) {
+            if (job.sourceMessageId) {
+                removeReaction(job.threadId, job.sourceMessageId, '⏳').catch(() => {});
+            }
+        }
+
+        // Collect eyes reactions and onComplete callbacks from absorbed jobs
+        const batchedEyesReactions = [
+            ...(base.batchedEyesReactions || []),
+            ...rest.filter(j => j.eyesReaction).map(j => j.eyesReaction!),
+        ];
+        const batchedOnCompletes = [
+            ...(base.batchedOnCompletes || []),
+            ...rest.filter(j => j.onComplete).map(j => j.onComplete!),
+        ];
+
+        return {
+            ...base,
+            prompt,
+            batchedEyesReactions: batchedEyesReactions.length > 0 ? batchedEyesReactions : undefined,
+            batchedOnCompletes: batchedOnCompletes.length > 0 ? batchedOnCompletes : undefined,
+        };
     }
 
     /**

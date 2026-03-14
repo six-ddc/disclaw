@@ -6,7 +6,7 @@
  */
 
 import type { ClaudeMessage } from './message-converter.js';
-import { sendEmbed as _sendEmbed, editEmbed, sendToThread, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
+import { sendEmbed as _sendEmbed, editEmbed, sendToThread, sendRichMessage, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import {
     escapeCodeBlock, formatToolName, truncateContent, cleanContent,
     buildToolUseEmbed, buildToolResultField,
@@ -250,9 +250,7 @@ export function createClaudeSender(threadId: string) {
                         );
                         if (stopReasonDisplay && stopReasonDisplay !== 'Completed') parts.push(stopReasonDisplay);
 
-                        const statusMsgId = await sendEmbed(threadId, [{
-                            description: `**Done** · ${parts.join(' · ')}`,
-                        }]);
+                        const statusMsgId = await sendRichMessage(threadId, `-# ${parts.join(' · ')}`, true);
                         scheduleStatusDelete(threadId, statusMsgId);
                         log(`Sent completion stats thread=${threadId} model=${modelName} durationMs=${durationMs} stopReason=${stopReasonDisplay}`);
                     }
