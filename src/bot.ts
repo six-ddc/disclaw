@@ -221,109 +221,119 @@ client.on(Events.MessageCreate, async (message: Message) => {
     const isInThread = message.channel.isThread();
 
     // =========================================================================
-    // THREAD MESSAGES: Continue existing conversations
+    // TRACKED THREAD: Continue existing conversation
     // =========================================================================
     if (isInThread) {
         const thread = message.channel;
-
-        // Look up session ID, working dir, and model for this thread
         const mapping = getThreadMapping(thread.id);
 
-        if (!mapping) {
-            // Not a thread we created, ignore
+        if (mapping) {
+            log(`Thread message: user=${message.author.tag} thread=${thread.id} messageId=${message.id} sessionId=${mapping.session_id || '(empty)'}`);
+
+            // React with eyes to acknowledge receipt
+            addReaction(thread.id, message.id, '👀').catch(() => {});
+
+            // Show typing indicator
+            log.debug(`Sending typing indicator: thread=${thread.id}`);
+            await thread.sendTyping();
+
+            // Extract multimodal content (images, files, replies)
+            log.debug(`Extracting multimodal content: thread=${thread.id} attachments=${message.attachments.size}`);
+            const multimodalPrompt = await extractMessageContent(message);
+            const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
+
+            // Use stored working dir or fall back to channel config / env / cwd
+            const workingDir = resolveWorkingDirWithMapping(mapping.working_dir, thread.parentId || '');
+
+            log.debug(`Thread working dir resolved: ${workingDir} thread=${thread.id}`);
+
+            const parentId = thread.parentId || '';
+            log(`Job submitted: thread=${thread.id} user=${message.author.tag} workingDir=${workingDir} model=${mapping.model || 'default'} permissionMode=${mapping.permission_mode || 'default'}`);
+            runner.submit({
+                prompt,
+                threadId: thread.id,
+                // resume: undefined — session state resolved lazily at execution time
+                // so per-thread queued jobs always get the latest DB state
+                userId: message.author.id,
+                username: message.author.tag,
+                workingDir,
+                model: mapping.model || undefined,
+                permissionMode: mapping.permission_mode || undefined,
+                parentChannelId: parentId || undefined,
+                statusMessageId: thread.id,
+                sourceMessageId: message.id,
+                eyesReaction: { channelId: thread.id, messageId: message.id },
+                createMcpServers: parentId
+                    ? () => ({ 'disclaw': createDisclawMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
+                    : undefined,
+            });
+
+            return;
+        }
+
+        // Untracked thread — only respond if @mentioned (e.g. forum posts)
+        if (!isMentioned) {
             log.debug(`Ignoring message in untracked thread: thread=${thread.id} user=${message.author.tag} messageId=${message.id}`);
             return;
         }
 
-        log(`Thread message: user=${message.author.tag} thread=${thread.id} messageId=${message.id} sessionId=${mapping.session_id || '(empty)'}`);
-
-        // React with eyes to acknowledge receipt
-        addReaction(thread.id, message.id, '👀').catch(() => {});
-
-        // Show typing indicator
-        log.debug(`Sending typing indicator: thread=${thread.id}`);
-        await thread.sendTyping();
-
-        // Extract multimodal content (images, files, replies)
-        log.debug(`Extracting multimodal content: thread=${thread.id} attachments=${message.attachments.size}`);
-        const multimodalPrompt = await extractMessageContent(message);
-        const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
-
-        // Use stored working dir or fall back to channel config / env / cwd
-        const workingDir = resolveWorkingDirWithMapping(mapping.working_dir, thread.parentId || '');
-
-        log.debug(`Thread working dir resolved: ${workingDir} thread=${thread.id}`);
-
-        const parentId = thread.parentId || '';
-        log(`Job submitted: thread=${thread.id} user=${message.author.tag} workingDir=${workingDir} model=${mapping.model || 'default'} permissionMode=${mapping.permission_mode || 'default'}`);
-        runner.submit({
-            prompt,
-            threadId: thread.id,
-            // resume: undefined — session state resolved lazily at execution time
-            // so per-thread queued jobs always get the latest DB state
-            userId: message.author.id,
-            username: message.author.tag,
-            workingDir,
-            model: mapping.model || undefined,
-            permissionMode: mapping.permission_mode || undefined,
-            parentChannelId: parentId || undefined,
-            statusMessageId: thread.id,
-            sourceMessageId: message.id,
-            eyesReaction: { channelId: thread.id, messageId: message.id },
-            createMcpServers: parentId
-                ? () => ({ 'disclaw': createDisclawMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
-                : undefined,
-        });
-
-        return;
+        // Fall through to new conversation flow — thread already exists
     }
 
     // =========================================================================
-    // NEW MENTIONS: Start new conversations
+    // NEW CONVERSATION: @mention required (in channel or untracked thread)
     // =========================================================================
     if (!isMentioned) return;
 
-    log(`New mention: user=${message.author.tag} channel=${message.channelId} messageId=${message.id}`);
+    // Determine if we're adopting an existing thread or need to create one
+    const existingThread = isInThread ? message.channel : null;
+    const channelId = existingThread?.parentId || message.channelId;
+
+    log(`New mention: user=${message.author.tag} ${existingThread ? `thread=${existingThread.id}` : `channel=${channelId}`} messageId=${message.id}`);
 
     // React with eyes to acknowledge receipt
     addReaction(message.channelId, message.id, '👀').catch(() => {});
 
     // Extract message content and resolve working directory
     const rawText = message.content.replace(/<@!?\d+>/g, '').trim();
-    const { workingDir, cleanedMessage, error: workingDirError } = parseWorkingDirFromMessage(rawText, message.channelId);
+    const { workingDir, cleanedMessage, error: workingDirError } = parseWorkingDirFromMessage(rawText, channelId);
 
-    // If path override validation failed, reply with error
     if (workingDirError) {
-        log.warn(`Working dir validation failed: user=${message.author.tag} channel=${message.channelId} error="${workingDirError}"`);
+        log.warn(`Working dir validation failed: user=${message.author.tag} channel=${channelId} error="${workingDirError}"`);
         await message.reply(workingDirError);
         return;
     }
 
-    log(`Working directory resolved: ${workingDir} channel=${message.channelId}`);
+    log(`Working directory resolved: ${workingDir} channel=${channelId}`);
 
     // Extract multimodal content (images, files, replies) using the cleaned text
-    log.debug(`Extracting multimodal content: channel=${message.channelId} attachments=${message.attachments.size}`);
+    log.debug(`Extracting multimodal content: channel=${channelId} attachments=${message.attachments.size}`);
     const multimodalPrompt = await extractMessageContent(message, cleanedMessage);
     const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
-    const displayText = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt.textSummary;
 
-    // Post status message in channel, then create thread from it
-    let statusMessage;
     let thread;
-    try {
-        statusMessage = await (message.channel as TextChannel).send('Processing...');
+    let statusMessageId: string;
 
-        const threadName = truncateCodePoints(displayText || 'New conversation', 50);
-
-        thread = await statusMessage.startThread({
-            name: threadName,
-            autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
-        });
-
-    } catch (error) {
-        log.error(`Failed to create thread: channel=${message.channelId} user=${message.author.tag} error=${error}`);
-        await message.reply('Failed to start thread. Try again?');
-        return;
+    if (existingThread) {
+        // Adopt the existing thread (forum post, manually created thread, etc.)
+        thread = existingThread;
+        statusMessageId = message.id;
+    } else {
+        // Create a new thread from a status message in the channel
+        const displayText = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt.textSummary;
+        try {
+            const statusMessage = await (message.channel as TextChannel).send('Processing...');
+            const threadName = truncateCodePoints(displayText || 'New conversation', 50);
+            thread = await statusMessage.startThread({
+                name: threadName,
+                autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+            });
+            statusMessageId = statusMessage.id;
+        } catch (error) {
+            log.error(`Failed to create thread: channel=${channelId} user=${message.author.tag} error=${error}`);
+            await message.reply('Failed to start thread. Try again?');
+            return;
+        }
     }
 
     db.run(
@@ -331,7 +341,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         [thread.id, '', workingDir]
     );
 
-    log(`Thread created: thread=${thread.id} channel=${message.channelId} user=${message.author.tag} workingDir=${workingDir}`);
+    log(`Thread ${existingThread ? 'adopted' : 'created'}: thread=${thread.id} channel=${channelId} user=${message.author.tag} workingDir=${workingDir}`);
 
     log.debug(`Sending typing indicator: thread=${thread.id}`);
     await thread.sendTyping();
@@ -344,10 +354,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
         userId: message.author.id,
         username: message.author.tag,
         workingDir,
-        parentChannelId: message.channelId,
-        statusMessageId: statusMessage.id,
+        parentChannelId: channelId,
+        statusMessageId,
         eyesReaction: { channelId: message.channelId, messageId: message.id },
-        createMcpServers: () => ({ 'disclaw': createDisclawMcpServer(message.channelId, message.author.id, workingDir, undefined, thread.id) }),
+        createMcpServers: () => ({ 'disclaw': createDisclawMcpServer(channelId, message.author.id, workingDir, undefined, thread.id) }),
     });
 });
 
