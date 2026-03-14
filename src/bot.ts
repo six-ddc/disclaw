@@ -17,10 +17,8 @@ import {
     SlashCommandBuilder,
     type Interaction,
 } from 'discord.js';
-import { homedir } from 'os';
-import { resolve } from 'path';
 import { runner } from './runner.js';
-import { db, getChannelConfigCached, getThreadMapping } from './db.js';
+import { db, getThreadMapping } from './db.js';
 import { truncateCodePoints, initDiscord, addReaction } from './discord.js';
 import {
     handleCd,
@@ -32,7 +30,6 @@ import {
     handleFork,
     handleResume,
     handleCron,
-    validateWorkingDir,
 } from './interactions.js';
 import { handleDirPickInteraction } from './dir-picker.js';
 import { handleHistoryInteraction } from './history.js';
@@ -43,50 +40,9 @@ import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
 import { extractMessageContent } from './attachment-handler.js';
 import { createLogger } from './logger.js';
+import { parseWorkingDirFromMessage, resolveWorkingDirWithMapping } from './working-dir.js';
 
 const log = createLogger('bot');
-
-// Helper function to resolve working directory from message or channel config
-function resolveWorkingDir(message: string, channelId: string): { workingDir: string; cleanedMessage: string; error?: string } {
-    // Check for [/path] prefix override
-    const pathMatch = message.match(/^\[([^\]]+)\]\s*/);
-    if (pathMatch && pathMatch[1]) {
-        let dir = pathMatch[1];
-        if (dir.startsWith('~')) {
-            dir = dir.replace('~', homedir());
-        }
-        const validationError = validateWorkingDir(dir);
-        if (validationError) {
-            log.debug(`Working dir path override rejected: dir=${dir} channel=${channelId} error="${validationError}"`);
-            return {
-                workingDir: '',
-                cleanedMessage: message.slice(pathMatch[0].length),
-                error: validationError
-            };
-        }
-        const resolved = resolve(dir);
-        log.debug(`Working dir resolved via [path] override: ${resolved} channel=${channelId}`);
-        return {
-            workingDir: resolved,
-            cleanedMessage: message.slice(pathMatch[0].length)
-        };
-    }
-
-    // Check channel config (cached)
-    const channelConfig = getChannelConfigCached(channelId);
-    if (channelConfig?.working_dir) {
-        log.debug(`Working dir resolved via channel config: ${channelConfig.working_dir} channel=${channelId}`);
-        return { workingDir: channelConfig.working_dir, cleanedMessage: message };
-    }
-
-    // Fall back to env or cwd
-    const fallback = process.env.CLAUDE_WORKING_DIR || process.cwd();
-    log.debug(`Working dir resolved via fallback: ${fallback} channel=${channelId}`);
-    return {
-        workingDir: fallback,
-        cleanedMessage: message
-    };
-}
 
 const client = new Client({
     intents: [
@@ -294,10 +250,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
         // Use stored working dir or fall back to channel config / env / cwd
-        const workingDir = resolve(mapping.working_dir ||
-            getChannelConfigCached(thread.parentId || '')?.working_dir ||
-            process.env.CLAUDE_WORKING_DIR ||
-            process.cwd());
+        const workingDir = resolveWorkingDirWithMapping(mapping.working_dir, thread.parentId || '');
 
         log.debug(`Thread working dir resolved: ${workingDir} thread=${thread.id}`);
 
@@ -337,7 +290,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
     // Extract message content and resolve working directory
     const rawText = message.content.replace(/<@!?\d+>/g, '').trim();
-    const { workingDir, cleanedMessage, error: workingDirError } = resolveWorkingDir(rawText, message.channelId);
+    const { workingDir, cleanedMessage, error: workingDirError } = parseWorkingDirFromMessage(rawText, message.channelId);
 
     // If path override validation failed, reply with error
     if (workingDirError) {

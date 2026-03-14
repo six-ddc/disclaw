@@ -25,7 +25,6 @@ import { resolve, dirname, basename } from 'path';
 import { runner } from './runner.js';
 import {
     db,
-    getChannelConfigCached,
     setChannelConfig,
     getThreadMapping,
     updateThreadSession,
@@ -41,39 +40,9 @@ import { listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { startDirPicker } from './dir-picker.js';
 import { sendHistory } from './history.js';
 import { createLogger } from './logger.js';
+import { validateWorkingDir, resolveWorkingDirFromContext, resolveWorkingDirWithMapping } from './working-dir.js';
 
 const log = createLogger('interactions');
-
-// Allowed working directories (configurable via env, comma-separated)
-const ALLOWED_DIRS = process.env.DISCLAW_ALLOWED_DIRS
-    ? process.env.DISCLAW_ALLOWED_DIRS.split(',').map(d => resolve(d.trim()))
-    : null;
-
-/** Validate that a path is within the allowed directories. */
-export function validateWorkingDir(dir: string): string | null {
-    const resolved = resolve(dir);
-    if (!ALLOWED_DIRS) {
-        if (!existsSync(resolved)) {
-            log.debug(`validateWorkingDir: directory not found: ${resolved}`);
-            return `Directory not found: \`${dir}\``;
-        }
-        log.debug(`validateWorkingDir: ok (no allowlist) → ${resolved}`);
-        return null;
-    }
-    const isAllowed = ALLOWED_DIRS.some(allowed =>
-        resolved === allowed || resolved.startsWith(allowed + '/')
-    );
-    if (!isAllowed) {
-        log.warn(`validateWorkingDir: ${resolved} not in allowed list`);
-        return `Directory not in allowed list. Allowed: ${ALLOWED_DIRS.join(', ')}`;
-    }
-    if (!existsSync(resolved)) {
-        log.debug(`validateWorkingDir: directory not found: ${resolved}`);
-        return `Directory not found: \`${dir}\``;
-    }
-    log.debug(`validateWorkingDir: ok → ${resolved}`);
-    return null;
-}
 
 // =========================================================================
 // HELPERS
@@ -104,14 +73,9 @@ function requireThreadSession(interaction: ChatInputCommandInteraction) {
 function resolveBaseDir(interaction: ChatInputCommandInteraction | AutocompleteInteraction): string {
     const isThread = interaction.channel?.isThread();
     if (isThread) {
-        const mapping = getThreadMapping(interaction.channel!.id);
-        const parentId = interaction.channel!.parentId || '';
-        return mapping?.working_dir ||
-            getChannelConfigCached(parentId)?.working_dir ||
-            process.env.CLAUDE_WORKING_DIR || process.cwd();
+        return resolveWorkingDirFromContext(interaction.channel!.id, interaction.channel!.parentId || '');
     }
-    const config = getChannelConfigCached(interaction.channelId);
-    return config?.working_dir || process.env.CLAUDE_WORKING_DIR || process.cwd();
+    return resolveWorkingDirFromContext(undefined, interaction.channelId);
 }
 
 /** List subdirectories matching a partial input for autocomplete. */
@@ -200,10 +164,7 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
         // No path — fall back to interactive dir picker
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const parentId = interaction.channel!.parentId || '';
-        const startDir = mapping.working_dir ||
-            getChannelConfigCached(parentId)?.working_dir ||
-            process.env.CLAUDE_WORKING_DIR || process.cwd();
+        const startDir = resolveWorkingDirWithMapping(mapping.working_dir, interaction.channel!.parentId || '');
         log.debug(`cd: start dir resolved to ${startDir} for thread ${threadId}`);
 
         const selected = await startDirPicker(interaction, startDir);
@@ -242,8 +203,7 @@ export async function handleCd(interaction: ChatInputCommandInteraction) {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const currentConfig = getChannelConfigCached(interaction.channelId);
-    const startDir = currentConfig?.working_dir || process.env.CLAUDE_WORKING_DIR || process.cwd();
+    const startDir = resolveWorkingDirFromContext(undefined, interaction.channelId);
     log.debug(`cd: channel start dir resolved to ${startDir} for channel ${interaction.channelId}`);
 
     const selected = await startDirPicker(interaction, startDir);
@@ -431,10 +391,7 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
         }
 
         // Determine working dir (inherit from original thread)
-        const workingDir = resolve(ctx.mapping.working_dir ||
-            getChannelConfigCached(parentChannelId)?.working_dir ||
-            process.env.CLAUDE_WORKING_DIR ||
-            process.cwd());
+        const workingDir = resolveWorkingDirWithMapping(ctx.mapping.working_dir, parentChannelId);
         log.debug(`fork: working dir resolved to ${workingDir} for thread ${ctx.threadId}`);
 
         // Create status message and new thread in parent channel
@@ -468,15 +425,12 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
     try {
         // Determine working dir: thread working_dir → channel config → env → cwd
         const isThread = interaction.channel?.isThread();
-        const threadMapping = isThread ? getThreadMapping(interaction.channel!.id) : null;
         const channelId = isThread
             ? (interaction.channel!.parentId || interaction.channelId)
             : interaction.channelId;
-        const channelConfig = getChannelConfigCached(channelId);
-        const workingDir = resolve(
-            threadMapping?.working_dir ||
-            channelConfig?.working_dir ||
-            process.env.CLAUDE_WORKING_DIR || process.cwd());
+        const workingDir = isThread
+            ? resolveWorkingDirFromContext(interaction.channel!.id, channelId)
+            : resolveWorkingDirFromContext(undefined, channelId);
         log.debug(`resume: working dir resolved to ${workingDir}`);
 
         // List recent sessions

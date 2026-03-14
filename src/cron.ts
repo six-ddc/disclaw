@@ -5,7 +5,6 @@
  * MCP server factory is in mcp-server.ts.
  */
 
-import { resolve } from 'path';
 import { Cron } from 'croner';
 import {
     type Client,
@@ -22,12 +21,12 @@ import {
     setCronJobLastRun,
     deleteCronJob,
     getThreadMapping,
-    getChannelConfigCached,
     type CronJob,
 } from './db.js';
 import { sendEmbed, truncateCodePoints } from './discord.js';
 import { sendCronControlPanel } from './cron-buttons.js';
 import { createLogger } from './logger.js';
+import { resolveWorkingDirWithMapping } from './working-dir.js';
 
 const log = createLogger('cron');
 
@@ -124,10 +123,7 @@ export class CronScheduler {
 
         // Get thread info for working dir and model
         const mapping = getThreadMapping(job.thread_id);
-        const workingDir = resolve(mapping?.working_dir ||
-            getChannelConfigCached(job.thread_id)?.working_dir ||
-            process.env.CLAUDE_WORKING_DIR ||
-            process.cwd());
+        const workingDir = resolveWorkingDirWithMapping(mapping?.working_dir ?? null, job.thread_id);
 
         // Send separator embed
         const now = new Date();
