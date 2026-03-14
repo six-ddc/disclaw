@@ -10,6 +10,7 @@
  */
 
 import { Database } from 'bun:sqlite';
+import type { PermissionMode, DisplayMode } from './types.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('db');
@@ -154,8 +155,8 @@ export interface ThreadMapping {
     working_dir: string | null;
     model: string | null;
     fork_from: string | null;
-    permission_mode: string | null;
-    display_mode: string | null;
+    permission_mode: PermissionMode | null;
+    display_mode: DisplayMode | null;
 }
 
 export function getThreadMapping(threadId: string): ThreadMapping | null {
@@ -175,12 +176,12 @@ export function updateThreadModel(threadId: string, model: string): void {
     log.debug(`Thread model updated: thread=${threadId}, model=${model}`);
 }
 
-export function updateThreadPermissionMode(threadId: string, mode: string | null): void {
+export function updateThreadPermissionMode(threadId: string, mode: PermissionMode | null): void {
     db.run('UPDATE threads SET permission_mode = ? WHERE thread_id = ?', [mode, threadId]);
     log.debug(`Thread permission mode updated: thread=${threadId}, mode=${mode || '(default)'}`);
 }
 
-export function updateThreadDisplayMode(threadId: string, mode: string | null): void {
+export function updateThreadDisplayMode(threadId: string, mode: DisplayMode | null): void {
     db.run('UPDATE threads SET display_mode = ? WHERE thread_id = ?', [mode, threadId]);
     log.debug(`Thread display mode updated: thread=${threadId}, mode=${mode || '(default)'}`);
 }

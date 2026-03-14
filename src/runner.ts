@@ -14,9 +14,8 @@ import { getThreadMapping, resolveSessionState, updateThreadSession, getThreadTi
 import { createCanUseTool, cleanupThread } from './user-input.js';
 import type { MultimodalPrompt } from './attachment-handler.js';
 import { createToolPager } from './tool-pager.js';
+import type { DisplayMode, PermissionMode } from './types.js';
 import { createLogger } from './logger.js';
-
-export type DisplayMode = 'verbose' | 'simple' | 'pager';
 
 /** Message types that bypass the pager and go directly to Discord as embeds */
 const PAGER_BYPASS_TYPES = new Set(['system']);
@@ -42,7 +41,7 @@ export interface ClaudeJob {
     /** When false, don't persist session to filesystem */
     persistSession?: boolean;
     /** SDK permission mode override (per-thread from DB) */
-    permissionMode?: string;
+    permissionMode?: PermissionMode;
     /** The Discord message ID that triggered this job (for queue indicator reactions) */
     sourceMessageId?: string;
     /** Channel+message where 👀 reaction was placed (for removal on completion) */
@@ -172,7 +171,7 @@ class JobRunner {
         const sender = createClaudeSender(job.threadId);
         // Resolve display mode: DB mapping > default
         const mapping = getThreadMapping(job.threadId);
-        const displayMode: DisplayMode = (mapping?.display_mode as DisplayMode) || 'pager';
+        const displayMode: DisplayMode = mapping?.display_mode ?? 'pager';
         log.debug(`Display mode for thread=${job.threadId}: ${displayMode}`);
         const pager = displayMode === 'pager' ? createToolPager(job.threadId) : null;
         if (pager) log.debug(`Pager created for thread=${job.threadId}`);

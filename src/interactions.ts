@@ -36,6 +36,8 @@ import {
     cronJobDisplayName,
 } from './db.js';
 import { truncateCodePoints, sendToThread, sendEmbed } from './discord.js';
+import { PERMISSION_MODES, DISPLAY_MODES, isValidPermissionMode, isValidDisplayMode } from './types.js';
+import type { PermissionMode, DisplayMode } from './types.js';
 import { listSessions } from '@anthropic-ai/claude-agent-sdk';
 import { startDirPicker } from './dir-picker.js';
 import { sendHistory } from './history.js';
@@ -340,21 +342,25 @@ export async function handleConfigSubmit(interaction: ModalSubmitInteraction) {
     const permValues = interaction.fields.getStringSelectValues('config_permission');
     if (permValues.length > 0) {
         const modeValue = permValues[0]!;
-        const envDefault = process.env.DISCLAW_PERMISSION_MODE || 'default';
-        updateThreadPermissionMode(threadId, modeValue === envDefault ? null : modeValue);
-        const modeInfo = PERMISSION_MODES.find(m => m.value === modeValue);
-        changes.push(`Permission → **${modeInfo?.label || modeValue}**`);
-        log(`Permission mode set to ${modeValue} in thread ${threadId}`);
+        if (isValidPermissionMode(modeValue)) {
+            const envDefault = process.env.DISCLAW_PERMISSION_MODE || 'default';
+            updateThreadPermissionMode(threadId, modeValue === envDefault ? null : modeValue);
+            const modeInfo = PERMISSION_MODES.find(m => m.value === modeValue);
+            changes.push(`Permission → **${modeInfo?.label || modeValue}**`);
+            log(`Permission mode set to ${modeValue} in thread ${threadId}`);
+        }
     }
 
     // Display
     const displayValues = interaction.fields.getStringSelectValues('config_display');
     if (displayValues.length > 0) {
         const modeValue = displayValues[0]!;
-        updateThreadDisplayMode(threadId, modeValue === 'verbose' ? null : modeValue);
-        const modeInfo = DISPLAY_MODES.find(m => m.value === modeValue);
-        changes.push(`Display → **${modeInfo?.label || modeValue}**`);
-        log(`Display mode set to ${modeValue} in thread ${threadId}`);
+        if (isValidDisplayMode(modeValue)) {
+            updateThreadDisplayMode(threadId, modeValue === 'verbose' ? null : modeValue);
+            const modeInfo = DISPLAY_MODES.find(m => m.value === modeValue);
+            changes.push(`Display → **${modeInfo?.label || modeValue}**`);
+            log(`Display mode set to ${modeValue} in thread ${threadId}`);
+        }
     }
 
     const summary = changes.length > 0 ? changes.join('\n') : 'No changes.';
@@ -550,18 +556,3 @@ export async function handleCron(interaction: ChatInputCommandInteraction) {
     });
 }
 
-/** Permission mode definitions with labels and descriptions */
-const PERMISSION_MODES = [
-    { value: 'default', label: 'Default', description: 'No auto-approvals; tools trigger approval UI' },
-    { value: 'dontAsk', label: 'Don\'t Ask', description: 'Deny instead of prompting (no canUseTool calls)' },
-    { value: 'acceptEdits', label: 'Accept Edits', description: 'Auto-accept file edits and filesystem operations' },
-    { value: 'bypassPermissions', label: 'Bypass', description: 'All tools run without permission prompts' },
-    { value: 'plan', label: 'Plan', description: 'No tool execution; Claude plans without making changes' },
-] as const;
-
-/** Display mode definitions */
-const DISPLAY_MODES = [
-    { value: 'verbose', label: 'Verbose', description: 'Show all tool messages as they arrive' },
-    { value: 'simple', label: 'Simple', description: 'Hide tool and thinking messages, show only final reply' },
-    { value: 'pager', label: 'Pager', description: 'Tool calls in a single navigable embed with page buttons' },
-] as const;

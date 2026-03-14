@@ -7,6 +7,8 @@
 
 import { query, type SDKMessage, type Query, type McpServerConfig, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MultimodalPrompt } from './attachment-handler.js';
+import type { PermissionMode } from './types.js';
+import { isValidPermissionMode } from './types.js';
 import { createLogger } from './logger.js';
 
 const TIMEZONE = process.env.TZ;
@@ -38,7 +40,7 @@ export interface QueryOptions {
     mcpServers?: Record<string, McpServerConfig>;
     persistSession?: boolean;
     /** SDK permission mode override (per-thread from DB, falls back to env) */
-    permissionMode?: string;
+    permissionMode?: PermissionMode;
     onMessage: (message: SDKMessage) => void | Promise<void>;
     onQuery?: (q: Query) => void;
     abortController?: AbortController;
@@ -71,7 +73,10 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
     const disallowedTools: string[] = ['CronCreate', 'CronList', 'CronDelete'];
 
     // Permission mode: per-thread override > env > default
-    const permMode = permModeOverride || process.env.DISCLAW_PERMISSION_MODE || 'default';
+    const envMode = process.env.DISCLAW_PERMISSION_MODE;
+    const permMode: PermissionMode = permModeOverride
+        || (envMode && isValidPermissionMode(envMode) ? envMode : undefined)
+        || 'default';
     const useBypass = permMode === 'bypassPermissions';
     log.debug(`Permission mode: ${permMode} (override: ${permModeOverride || 'none'}, env: ${process.env.DISCLAW_PERMISSION_MODE || 'none'}, bypass: ${useBypass})`);
 
@@ -99,7 +104,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
         prompt: sdkPrompt,
         options: {
             cwd,
-            permissionMode: permMode as 'default' | 'bypassPermissions' | 'plan' | 'acceptEdits' | 'dontAsk',
+            permissionMode: permMode,
             ...(useBypass ? { allowDangerouslySkipPermissions: true } : {}),
             ...(canUseTool ? { canUseTool } : {}),
             stderr: (data: string) => log(`[stderr] ${data}`),
