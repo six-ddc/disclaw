@@ -12,7 +12,7 @@
 
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeMessage } from './message-converter.js';
-import type { ButtonInteraction } from 'discord.js';
+import type { ActionRowBuilder, ButtonBuilder, ButtonInteraction } from 'discord.js';
 import { sendRichMessage, editRichMessage, truncateCodePoints, buildPaginationRow, splitMarkdown, type EmbedData } from './discord.js';
 import { getThreadMapping, savePagerMessage, getPagerMessage } from './db.js';
 import {
@@ -157,23 +157,19 @@ interface LivePagerState {
 const activePagers = new Map<string, LivePagerState>();
 let pagerCounter = 0;
 
-function buildLiveEmbed(state: LivePagerState): EmbedData {
-    const total = state.pages.length;
-    if (total === 0) {
-        return {
-            color: 0x0099ff,
-            title: '📄 Messages (0/0)',
-            description: 'Waiting...',
-        };
+/** Build the send/edit payload for the current page (text pages use content, others use embeds) */
+function buildPagePayload(page: PagerPage, pageIdx: number, total: number, components: ActionRowBuilder<ButtonBuilder>[]) {
+    if (page.kind === 'text') {
+        return { content: page.content || '', embeds: [], components };
     }
-    return buildPageEmbed(state.pages[state.currentPage]!, state.currentPage, total);
+    return { content: '', embeds: [buildPageEmbed(page, pageIdx, total)], components };
 }
 
 async function doFlush(state: LivePagerState): Promise<void> {
     state.pendingUpdate = false;
     if (state.pages.length === 0) return;
 
-    const embed = buildLiveEmbed(state);
+    const page = state.pages[state.currentPage]!;
     const action = state.messageId ? 'edit' : 'send';
     log.debug(`[${state.id}] doFlush: ${action}, page=${state.currentPage}/${state.pages.length}`);
 
@@ -181,17 +177,12 @@ async function doFlush(state: LivePagerState): Promise<void> {
         const components = state.pages.length > 1
             ? [buildLiveButtons(state.id, state.currentPage, state.pages.length)]
             : [];
+        const payload = buildPagePayload(page, state.currentPage, state.pages.length, components);
         if (!state.messageId) {
-            state.messageId = await sendRichMessage(state.threadId, {
-                embeds: [embed],
-                components,
-            });
+            state.messageId = await sendRichMessage(state.threadId, payload);
             log(`[${state.id}] Initial message sent: messageId=${state.messageId}`);
         } else {
-            await editRichMessage(state.threadId, state.messageId, {
-                embeds: [embed],
-                components,
-            });
+            await editRichMessage(state.threadId, state.messageId, payload);
         }
     } catch (e) {
         log.error(`[${state.id}] doFlush failed: ${e}`);
@@ -297,7 +288,7 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
 async function renderPersistentPage(
     sessionId: string, pageIdx: number,
     msgOffset: number, msgLimit: number, dir?: string,
-): Promise<{ embed: EmbedData; total: number; pageIdx: number } | null> {
+): Promise<{ page: PagerPage; total: number; pageIdx: number } | null> {
     try {
         // Only fetch this round's messages using offset/limit
         const rawMessages = await getSessionMessages(sessionId, {
@@ -315,7 +306,7 @@ async function renderPersistentPage(
         const clampedIdx = Math.max(0, Math.min(pageIdx, pages.length - 1));
         log.debug(`renderPersistentPage: ${pages.length} pages, showing page ${clampedIdx + 1}`);
         return {
-            embed: buildPageEmbed(pages[clampedIdx]!, clampedIdx, pages.length),
+            page: pages[clampedIdx]!,
             total: pages.length,
             pageIdx: clampedIdx,
         };
@@ -618,14 +609,11 @@ export function createToolPager(threadId: string): ToolPager {
                 if (total > 0) {
                     // Show last page with persistent buttons — auto-strip after 30s
                     const lastIdx = total - 1;
-                    const embed = buildPageEmbed(pages[lastIdx]!, lastIdx, total);
                     const row = total > 1
                         ? buildPersistentButtons(sessionId, lastIdx, total, msgOffset, msgLimit)
                         : null;
-                    await editRichMessage(state.threadId, state.messageId, {
-                        embeds: [embed],
-                        components: row ? [row] : [],
-                    });
+                    const payload = buildPagePayload(pages[lastIdx]!, lastIdx, total, row ? [row] : []);
+                    await editRichMessage(state.threadId, state.messageId, payload);
                     // Save metadata to DB for reaction-triggered restore
                     savePagerMessage(state.messageId, state.threadId, sessionId, msgOffset, msgLimit, workingDir);
                     // Schedule button removal (30s) — or immediately if next pager appears
@@ -702,10 +690,8 @@ export async function hidePagerButtons(messageId: string): Promise<boolean> {
         );
         if (!result) return false;
 
-        await editRichMessage(pagerData.thread_id, messageId, {
-            embeds: [result.embed],
-            components: [],
-        });
+        const payload = buildPagePayload(result.page, result.pageIdx, result.total, []);
+        await editRichMessage(pagerData.thread_id, messageId, payload);
         return true;
     } catch (e) {
         log.error(`Failed to hide pager buttons: ${e}`);
@@ -733,10 +719,8 @@ export async function restorePagerButtons(messageId: string): Promise<boolean> {
             pagerData.session_id, result.pageIdx, result.total,
             pagerData.msg_offset, pagerData.msg_limit,
         );
-        await editRichMessage(pagerData.thread_id, messageId, {
-            embeds: [result.embed],
-            components: [row],
-        });
+        const payload = buildPagePayload(result.page, result.pageIdx, result.total, [row]);
+        await editRichMessage(pagerData.thread_id, messageId, payload);
         log(`Restored pager buttons: message=${messageId}, pages=${result.total}`);
         return true;
     } catch (e) {
@@ -815,7 +799,8 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
                     const result = await renderPersistentPage(mapping.session_id, Infinity, offset, limit, dir);
                     if (result) {
                         const row = buildPersistentButtons(mapping.session_id, result.pageIdx, result.total, offset, limit);
-                        await interaction.editReply({ embeds: [result.embed], components: [row] });
+                        const payload = buildPagePayload(result.page, result.pageIdx, result.total, [row]);
+                        await interaction.editReply(payload);
                         log(`Phase 1→2 auto-upgrade: thread=${threadId}, session=${mapping.session_id}, offset=${offset}, limit=${limit}, pages=${result.total}`);
                         return true;
                     }
@@ -834,9 +819,10 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
         log.debug(`Phase 1 navigation: pagerId=${pagerId}, action=${action}, page=${state.currentPage + 1}/${state.pages.length}`);
 
         try {
-            const embed = buildLiveEmbed(state);
+            const page = state.pages[state.currentPage]!;
             const row = buildLiveButtons(state.id, state.currentPage, state.pages.length);
-            await interaction.update({ embeds: [embed], components: [row] });
+            const payload = buildPagePayload(page, state.currentPage, state.pages.length, [row]);
+            await interaction.update(payload);
         } catch (e) {
             log.error(`Failed to handle live pager interaction: pagerId=${pagerId}, action=${action}: ${e}`);
         }
@@ -868,10 +854,8 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
             const result = await renderPersistentPage(sessionId, pageIdx, msgOffset, msgLimit, dir);
             if (result) {
                 const row = buildPersistentButtons(sessionId, result.pageIdx, result.total, msgOffset, msgLimit);
-                await interaction.editReply({
-                    embeds: [result.embed],
-                    components: [row],
-                });
+                const payload = buildPagePayload(result.page, result.pageIdx, result.total, [row]);
+                await interaction.editReply(payload);
             } else {
                 log.warn(`Persistent pager: no pages found for session=${sessionId}, offset=${msgOffset}, limit=${msgLimit}, dir=${dir}`);
                 await interaction.editReply({

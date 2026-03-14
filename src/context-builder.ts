@@ -231,8 +231,13 @@ async function formatUserMessage(message: Message, overrideText?: string): Promi
 export interface BuildPromptOptions {
     message: Message;
     overrideText?: string;
-    /** true only when adopting an existing untracked thread (forum posts, etc.) */
-    includeContext: boolean;
+    /**
+     * What context to prepend:
+     * - false: no context
+     * - 'full': channel info + forum post + history (adopting untracked thread)
+     * - 'forum': channel info + forum post only, no history (cleared session in forum thread)
+     */
+    includeContext: boolean | 'full' | 'forum';
 }
 
 /**
@@ -245,12 +250,15 @@ export interface BuildPromptOptions {
 export async function buildPrompt(options: BuildPromptOptions): Promise<MultimodalPrompt> {
     const { message, overrideText, includeContext } = options;
 
+    // Normalize: true → 'full' for backwards compat
+    const contextMode = includeContext === true ? 'full' : includeContext;
+
     // Format the user's message as XML
     const { xml: messageXml, mediaBlocks } = await formatUserMessage(message, overrideText);
 
     let fullXml: string;
 
-    if (includeContext && message.channel.isThread()) {
+    if (contextMode && message.channel.isThread()) {
         const thread = message.channel;
 
         // Build context parts
@@ -272,9 +280,11 @@ export async function buildPrompt(options: BuildPromptOptions): Promise<Multimod
             }
         }
 
-        // Thread history
-        const history = await fetchThreadHistory(thread, message.id);
-        if (history) contextParts.push(history);
+        // Thread history (only in 'full' mode)
+        if (contextMode === 'full') {
+            const history = await fetchThreadHistory(thread, message.id);
+            if (history) contextParts.push(history);
+        }
 
         if (contextParts.length > 0) {
             fullXml = `<context>\n${contextParts.join('\n')}\n</context>\n\n${messageXml}`;

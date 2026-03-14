@@ -6,6 +6,7 @@
  */
 
 import {
+    ChannelType,
     Client,
     GatewayIntentBits,
     Events,
@@ -238,9 +239,13 @@ client.on(Events.MessageCreate, async (message: Message) => {
             log.debug(`Sending typing indicator: thread=${thread.id}`);
             await thread.sendTyping();
 
-            // Build XML-formatted prompt (no context for tracked threads)
-            log.debug(`Building prompt: thread=${thread.id} attachments=${message.attachments.size}`);
-            const multimodalPrompt = await buildPrompt({ message, includeContext: false });
+            // For forum threads with empty session (after clear or fresh adoption),
+            // include forum post title/body so the agent knows the topic
+            const isForumThread = thread.parent?.type === ChannelType.GuildForum || thread.parent?.type === ChannelType.GuildMedia;
+            const needsForumContext = isForumThread && !mapping.session_id;
+
+            log.debug(`Building prompt: thread=${thread.id} attachments=${message.attachments.size} forumContext=${needsForumContext}`);
+            const multimodalPrompt = await buildPrompt({ message, includeContext: needsForumContext ? 'forum' : false });
             const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
             // Use stored working dir or fall back to channel config / env / cwd

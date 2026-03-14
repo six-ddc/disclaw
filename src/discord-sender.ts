@@ -209,10 +209,11 @@ export function createClaudeSender(threadId: string) {
                         if (model) parts.push(model);
                         const cwd = meta<string>(metadata, 'cwd', '');
                         if (cwd) parts.push(`\`${cwd}\``);
-                        await sendEmbed(threadId, [{
+                        const sessionMsgId = await sendEmbed(threadId, [{
                             color: 0x57f287,
                             description: `**${label}** · ${parts.join(' · ')}`,
                         }]);
+                        scheduleStatusDelete(threadId, sessionMsgId);
                         log(`Sent new_session embed thread=${threadId} label=${label} model=${model} cwd=${cwd}`);
                         break;
                     }
