@@ -60,7 +60,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
             model, forkSession, resumeSessionAt, mcpServers, persistSession, canUseTool,
             permissionMode: permModeOverride } = options;
 
-    const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || process.cwd(); // Final fallback — callers should resolve via working-dir.ts
+    const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || '/tmp/disclaw'; // Final fallback — callers should resolve via working-dir.ts
     log(`Query started - session: ${sessionId || '(auto)'}, resume: ${resume}, model: ${model || '(default)'}, workingDir: ${cwd}`);
     if (forkSession) log(`Forking session from: ${sessionId}`);
     if (resumeSessionAt) log(`Resuming session at message: ${resumeSessionAt}`);

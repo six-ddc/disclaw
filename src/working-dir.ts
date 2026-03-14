@@ -5,13 +5,18 @@
  * Fallback chain: [/path] prefix → mapping.working_dir → channel config → env → cwd()
  */
 
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { resolve } from 'path';
 import { homedir } from 'os';
 import { getChannelConfigCached, getThreadMapping } from './db.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('working-dir');
+
+const DEFAULT_WORKING_DIR = '/tmp/disclaw';
+
+// Ensure the default working directory exists
+mkdirSync(DEFAULT_WORKING_DIR, { recursive: true });
 
 // Allowed working directories (configurable via env, comma-separated)
 const ALLOWED_DIRS = process.env.DISCLAW_ALLOWED_DIRS
@@ -73,7 +78,7 @@ export function resolveWorkingDirFromContext(threadId?: string, channelId?: stri
     }
 
     // 3. Environment variable or cwd
-    const fallback = process.env.CLAUDE_WORKING_DIR || process.cwd();
+    const fallback = process.env.CLAUDE_WORKING_DIR || DEFAULT_WORKING_DIR;
     log.debug(`Working dir resolved via fallback: ${fallback}`);
     return resolve(fallback);
 }
@@ -94,7 +99,7 @@ export function resolveWorkingDirWithMapping(mappingWorkingDir: string | null, c
         return resolve(channelConfig.working_dir);
     }
 
-    return resolve(process.env.CLAUDE_WORKING_DIR || process.cwd());
+    return resolve(process.env.CLAUDE_WORKING_DIR || DEFAULT_WORKING_DIR);
 }
 
 /**

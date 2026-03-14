@@ -342,12 +342,15 @@ client.on(Events.MessageCreate, async (message: Message) => {
         }
     }
 
+    // For adopted threads, preserve the existing title to prevent auto-title generation
+    const preservedTitle = existingThread ? existingThread.name : null;
+
     db.run(
-        'INSERT INTO threads (thread_id, session_id, working_dir) VALUES (?, ?, ?)',
-        [thread.id, '', workingDir]
+        'INSERT INTO threads (thread_id, session_id, working_dir, title) VALUES (?, ?, ?, ?)',
+        [thread.id, '', workingDir, preservedTitle]
     );
 
-    log(`Thread ${existingThread ? 'adopted' : 'created'}: thread=${thread.id} channel=${channelId} user=${message.author.tag} workingDir=${workingDir}`);
+    log(`Thread ${existingThread ? 'adopted' : 'created'}: thread=${thread.id} channel=${channelId} user=${message.author.tag} workingDir=${workingDir}${preservedTitle ? ` title="${preservedTitle}"` : ''}`);
 
     log.debug(`Sending typing indicator: thread=${thread.id}`);
     await thread.sendTyping();
