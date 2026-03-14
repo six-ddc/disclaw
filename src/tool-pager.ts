@@ -739,6 +739,44 @@ export async function restorePagerButtons(messageId: string): Promise<boolean> {
     }
 }
 
+/** Parsed persistent pager button ID */
+interface PagerButtonId {
+    sessionId: string;
+    msgOffset: number;
+    msgLimit: number;
+    pageIdx: number;
+    action: string;
+}
+
+/**
+ * Parse a persistent pager button custom ID (pgr:...) into a typed result.
+ * Supports two formats:
+ *   Current: pgr:<sessionId>:<msgOffset>:<msgLimit>:<pageIdx>:<action>
+ *   Legacy:  pgr:<sessionId>:<pageIdx>:<action>  (offset=0, limit=0)
+ * Returns null if the format is invalid.
+ */
+function parsePagerButtonId(customId: string): PagerButtonId | null {
+    const parts = customId.split(':');
+
+    if (parts.length >= 6) {
+        // Current format: pgr:<sessionId>:<msgOffset>:<msgLimit>:<pageIdx>:<action>
+        const msgOffset = parseInt(parts[2]!, 10);
+        const msgLimit = parseInt(parts[3]!, 10);
+        const pageIdx = parseInt(parts[4]!, 10);
+        if (isNaN(pageIdx) || isNaN(msgOffset) || isNaN(msgLimit)) return null;
+        return { sessionId: parts[1]!, msgOffset, msgLimit, pageIdx, action: parts[5]! };
+    }
+
+    if (parts.length >= 4) {
+        // Legacy format: pgr:<sessionId>:<pageIdx>:<action>  (no offset/limit, fetch all)
+        const pageIdx = parseInt(parts[2]!, 10);
+        if (isNaN(pageIdx)) return null;
+        return { sessionId: parts[1]!, msgOffset: 0, msgLimit: 0, pageIdx, action: parts[3]! };
+    }
+
+    return null;
+}
+
 /**
  * Handle pager button interactions.
  * Phase 1 (live): pager:<id>:<action>
@@ -800,36 +838,11 @@ export async function handlePagerInteraction(interaction: ButtonInteraction): Pr
     }
 
     // Phase 2: Persistent SDK-backed buttons
-    // Current: pgr:<sessionId>:<msgOffset>:<msgLimit>:<pageIdx>:<action>
-    // Legacy:  pgr:<sessionId>:<pageIdx>:<action>
     if (customId.startsWith('pgr:')) {
-        const parts = customId.split(':');
+        const parsed = parsePagerButtonId(customId);
+        if (!parsed) return false;
 
-        let sessionId: string;
-        let msgOffset: number;
-        let msgLimit: number;
-        let pageIdx: number;
-        let action: string;
-
-        if (parts.length >= 6) {
-            // Current format
-            sessionId = parts[1]!;
-            msgOffset = parseInt(parts[2]!, 10);
-            msgLimit = parseInt(parts[3]!, 10);
-            pageIdx = parseInt(parts[4]!, 10);
-            action = parts[5]!;
-            if (isNaN(pageIdx) || isNaN(msgOffset) || isNaN(msgLimit)) return false;
-        } else if (parts.length >= 4) {
-            // Legacy format: no offset/limit, fetch all
-            sessionId = parts[1]!;
-            pageIdx = parseInt(parts[2]!, 10);
-            action = parts[3]!;
-            msgOffset = 0;
-            msgLimit = 0; // 0 = no limit
-            if (isNaN(pageIdx)) return false;
-        } else {
-            return false;
-        }
+        let { sessionId, msgOffset, msgLimit, pageIdx, action } = parsed;
 
         if (action === 'prev') {
             pageIdx = Math.max(0, pageIdx - 1);

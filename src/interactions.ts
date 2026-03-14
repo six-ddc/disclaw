@@ -38,7 +38,7 @@ import {
 import { truncateCodePoints, sendToThread, sendEmbed } from './discord.js';
 import { PERMISSION_MODES, DISPLAY_MODES, isValidPermissionMode, isValidDisplayMode } from './types.js';
 import type { PermissionMode, DisplayMode } from './types.js';
-import { listSessions } from '@anthropic-ai/claude-agent-sdk';
+import { listSessions, type SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import { startDirPicker } from './dir-picker.js';
 import { sendHistory } from './history.js';
 import { createLogger } from './logger.js';
@@ -424,19 +424,92 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
     }
 }
 
+/** Resolve working directory for resume: thread → channel config → env → cwd */
+function resolveResumeWorkingDir(interaction: ChatInputCommandInteraction): string {
+    const isThread = interaction.channel?.isThread();
+    const channelId = isThread
+        ? (interaction.channel!.parentId || interaction.channelId)
+        : interaction.channelId;
+    return isThread
+        ? resolveWorkingDirFromContext(interaction.channel!.id, channelId)
+        : resolveWorkingDirFromContext(undefined, channelId);
+}
+
+/** Build a select menu from a list of sessions for resume */
+function buildSessionSelectMenu(sessions: SDKSessionInfo[]): StringSelectMenuBuilder {
+    return new StringSelectMenuBuilder()
+        .setCustomId('disclaw_resume_select')
+        .setPlaceholder('Pick a session to resume')
+        .addOptions(
+            sessions.map((s) => {
+                const time = new Date(s.lastModified).toLocaleString('en-US', {
+                    month: 'short', day: 'numeric',
+                    hour: 'numeric', minute: '2-digit', hour12: true,
+                });
+                const desc = s.firstPrompt
+                    ? `${time} · ${truncateCodePoints(s.firstPrompt.replace(/\n/g, ' '), 100 - time.length - 3)}`
+                    : time;
+                return {
+                    label: truncateCodePoints(s.summary || s.firstPrompt || s.sessionId, 100),
+                    value: s.sessionId,
+                    description: truncateCodePoints(desc, 100),
+                };
+            })
+        );
+}
+
+/** Resume a session in an existing thread (update session mapping + show history) */
+async function resumeInExistingThread(
+    threadId: string, sessionId: string, summary: string,
+    workingDir: string, selected: StringSelectMenuInteraction, userTag: string,
+): Promise<void> {
+    const mapping = getThreadMapping(threadId);
+    if (mapping) {
+        updateThreadSession(threadId, sessionId);
+        await selected.update({ content: `Resumed: ${summary}`, components: [] });
+        await sendEmbed(threadId, [{
+            color: 0x57f287,
+            description: `**Resumed session** · \`${workingDir}\``,
+        }]);
+        await sendHistory(threadId, sessionId, workingDir);
+        log(`Resumed session ${sessionId} in thread ${threadId} by ${userTag}`);
+    } else {
+        log.warn(`resume: no mapping for thread ${threadId} when trying to resume`);
+        await selected.update({ content: 'No active session in this thread.', components: [] });
+    }
+}
+
+/** Resume a session by creating a new thread in the parent channel */
+async function resumeInNewThread(
+    parentChannel: TextChannel, sessionId: string, summary: string,
+    workingDir: string, selected: StringSelectMenuInteraction, userTag: string,
+): Promise<void> {
+    const statusMessage = await parentChannel.send(`Resuming: ${truncateCodePoints(summary, 100)}`);
+    const newThread = await statusMessage.startThread({
+        name: truncateCodePoints(summary, 50),
+        autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+    });
+
+    db.run(
+        'INSERT INTO threads (thread_id, session_id, working_dir) VALUES (?, ?, ?)',
+        [newThread.id, sessionId, workingDir]
+    );
+
+    await selected.update({ content: `Resumed in <#${newThread.id}>`, components: [] });
+    await sendEmbed(newThread.id, [{
+        color: 0x57f287,
+        description: `**Resumed session** · \`${workingDir}\``,
+    }]);
+    await sendHistory(newThread.id, sessionId, workingDir);
+    log(`Resumed session ${sessionId} in new thread ${newThread.id} by ${userTag}`);
+}
+
 export async function handleResume(interaction: ChatInputCommandInteraction) {
     log(`/disclaw resume invoked by ${interaction.user.tag} in channel ${interaction.channelId}`);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-        // Determine working dir: thread working_dir → channel config → env → cwd
-        const isThread = interaction.channel?.isThread();
-        const channelId = isThread
-            ? (interaction.channel!.parentId || interaction.channelId)
-            : interaction.channelId;
-        const workingDir = isThread
-            ? resolveWorkingDirFromContext(interaction.channel!.id, channelId)
-            : resolveWorkingDirFromContext(undefined, channelId);
+        const workingDir = resolveResumeWorkingDir(interaction);
         log.debug(`resume: working dir resolved to ${workingDir}`);
 
         // List recent sessions
@@ -450,27 +523,8 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
         const top = sessions.slice(0, 25);
         log.debug(`resume: found ${sessions.length} sessions, presenting ${top.length}`);
 
-        // Build select menu — use summary/firstPrompt (already available), no extra fetches
-        const select = new StringSelectMenuBuilder()
-            .setCustomId('disclaw_resume_select')
-            .setPlaceholder('Pick a session to resume')
-            .addOptions(
-                top.map((s) => {
-                    const time = new Date(s.lastModified).toLocaleString('en-US', {
-                        month: 'short', day: 'numeric',
-                        hour: 'numeric', minute: '2-digit', hour12: true,
-                    });
-                    const desc = s.firstPrompt
-                        ? `${time} · ${truncateCodePoints(s.firstPrompt.replace(/\n/g, ' '), 100 - time.length - 3)}`
-                        : time;
-                    return {
-                        label: truncateCodePoints(s.summary || s.firstPrompt || s.sessionId, 100),
-                        value: s.sessionId,
-                        description: truncateCodePoints(desc, 100),
-                    };
-                })
-            );
-
+        // Show session selection UI
+        const select = buildSessionSelectMenu(top);
         const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
         const reply = await interaction.editReply({ content: 'Pick a session:', components: [row] });
 
@@ -490,42 +544,17 @@ export async function handleResume(interaction: ChatInputCommandInteraction) {
         const selectedSession = sessions.find(s => s.sessionId === selectedSessionId);
         const summary = selectedSession?.summary || selectedSessionId.slice(0, 8);
 
+        // Dispatch to the appropriate resume path
         if (interaction.channel?.isThread()) {
-            const threadId = interaction.channel.id;
-            const mapping = getThreadMapping(threadId);
-            if (mapping) {
-                updateThreadSession(threadId, selectedSessionId);
-                await selected.update({ content: `Resumed: ${summary}`, components: [] });
-                await sendEmbed(threadId, [{
-                    color: 0x57f287,
-                    description: `**Resumed session** · \`${workingDir}\``,
-                }]);
-                await sendHistory(threadId, selectedSessionId, workingDir);
-                log(`Resumed session ${selectedSessionId} in thread ${threadId} by ${interaction.user.tag}`);
-            } else {
-                log.warn(`resume: no mapping for thread ${threadId} when trying to resume`);
-                await selected.update({ content: 'No active session in this thread.', components: [] });
-            }
-        } else {
-            const parentChannel = interaction.channel as TextChannel;
-            const statusMessage = await parentChannel.send(`Resuming: ${truncateCodePoints(summary, 100)}`);
-            const newThread = await statusMessage.startThread({
-                name: truncateCodePoints(summary, 50),
-                autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
-            });
-
-            db.run(
-                'INSERT INTO threads (thread_id, session_id, working_dir) VALUES (?, ?, ?)',
-                [newThread.id, selectedSessionId, workingDir]
+            await resumeInExistingThread(
+                interaction.channel.id, selectedSessionId, summary,
+                workingDir, selected, interaction.user.tag,
             );
-
-            await selected.update({ content: `Resumed in <#${newThread.id}>`, components: [] });
-            await sendEmbed(newThread.id, [{
-                color: 0x57f287,
-                description: `**Resumed session** · \`${workingDir}\``,
-            }]);
-            await sendHistory(newThread.id, selectedSessionId, workingDir);
-            log(`Resumed session ${selectedSessionId} in new thread ${newThread.id} by ${interaction.user.tag}`);
+        } else {
+            await resumeInNewThread(
+                interaction.channel as TextChannel, selectedSessionId, summary,
+                workingDir, selected, interaction.user.tag,
+            );
         }
     } catch (error) {
         log.error(`resume: failed for ${interaction.user.tag}: ${error}`);
