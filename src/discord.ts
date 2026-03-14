@@ -11,7 +11,7 @@ import { createWriteStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Routes } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, Routes } from 'discord.js';
 import type { Client, TextChannel } from 'discord.js';
 import { createLogger } from './logger.js';
 
@@ -387,7 +387,7 @@ export interface EmbedData {
  * Send a message to a Discord thread.
  * Splits long messages using markdown-aware chunking to preserve code blocks.
  */
-export async function sendToThread(threadId: string, content: string): Promise<void> {
+export async function sendToThread(threadId: string, content: string, quiet?: boolean): Promise<void> {
     if (!content.trim()) {
         log.debug(`Skipping empty message for thread ${threadId}`);
         return;
@@ -397,7 +397,8 @@ export async function sendToThread(threadId: string, content: string): Promise<v
     log.debug(`Sending message to thread ${threadId} (${content.length} chars, ${chunks.length} chunks)`);
     for (const chunk of chunks) {
         if (!chunk.trim()) continue;
-        await channel.send(suppressLinkPreviews ? wrapUrls(chunk) : chunk);
+        const text = suppressLinkPreviews ? wrapUrls(chunk) : chunk;
+        await channel.send(quiet ? { content: text, flags: MessageFlags.SuppressNotifications } : text);
     }
     log(`Message sent to thread ${threadId} (${content.length} chars, ${chunks.length} chunks)`);
 }
@@ -405,9 +406,9 @@ export async function sendToThread(threadId: string, content: string): Promise<v
 /**
  * Send embed messages to a Discord thread. Returns the Discord message ID.
  */
-export async function sendEmbed(threadId: string, embeds: EmbedData[]): Promise<string> {
+export async function sendEmbed(threadId: string, embeds: EmbedData[], quiet?: boolean): Promise<string> {
     const channel = await getChannel(threadId);
-    const msg = await channel.send({ embeds });
+    const msg = await channel.send({ embeds, ...(quiet ? { flags: MessageFlags.SuppressNotifications } : {}) });
     log(`Embed sent to thread ${threadId} (messageId=${msg.id}, ${embeds.length} embeds)`);
     return msg.id;
 }
@@ -460,8 +461,11 @@ export async function renameThread(threadId: string, name: string): Promise<void
 /**
  * Send a rich message (embeds + components) to a channel. Returns the message ID.
  */
-export async function sendRichMessage(channelId: string, payload: Parameters<TextChannel['send']>[0]): Promise<string> {
+export async function sendRichMessage(channelId: string, payload: Parameters<TextChannel['send']>[0], quiet?: boolean): Promise<string> {
     const channel = await getChannel(channelId);
+    if (quiet && typeof payload === 'object' && !('body' in payload)) {
+        (payload as Record<string, unknown>).flags = MessageFlags.SuppressNotifications;
+    }
     const msg = await channel.send(payload);
     log(`Rich message sent (channelId=${channelId}, messageId=${msg.id})`);
     return msg.id;

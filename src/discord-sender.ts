@@ -6,7 +6,7 @@
  */
 
 import type { ClaudeMessage } from './message-converter.js';
-import { sendEmbed, editEmbed, sendToThread, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
+import { sendEmbed as _sendEmbed, editEmbed, sendToThread, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import {
     escapeCodeBlock, formatToolName, truncateContent, cleanContent,
     buildToolUseEmbed, buildToolResultField,
@@ -14,6 +14,9 @@ import {
 import { createLogger } from './logger.js';
 
 const log = createLogger('discord-sender');
+
+/** Send embed with SUPPRESS_NOTIFICATIONS by default (all non-text messages are quiet) */
+const sendEmbed = (threadId: string, embeds: EmbedData[]) => _sendEmbed(threadId, embeds, true);
 
 /** Tools whose tool_use and tool_result are silently suppressed (content already sent to Discord) */
 const SILENT_TOOLS = new Set([
@@ -96,7 +99,7 @@ function scheduleStatusDelete(threadId: string, messageId: string) {
     const timer = setTimeout(() => {
         lastStatusMessage.delete(threadId);
         deleteMessage(threadId, messageId).catch(() => {});
-    }, 30_000);
+    }, 10_000);
     lastStatusMessage.set(threadId, { messageId, timer });
 }
 

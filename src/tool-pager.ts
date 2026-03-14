@@ -179,7 +179,7 @@ async function doFlush(state: LivePagerState): Promise<void> {
             : [];
         const payload = buildPagePayload(page, state.currentPage, state.pages.length, components);
         if (!state.messageId) {
-            state.messageId = await sendRichMessage(state.threadId, payload);
+            state.messageId = await sendRichMessage(state.threadId, payload, true);
             log(`[${state.id}] Initial message sent: messageId=${state.messageId}`);
         } else {
             await editRichMessage(state.threadId, state.messageId, payload);
