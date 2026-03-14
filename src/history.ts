@@ -6,8 +6,8 @@
  */
 
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type InteractionUpdateOptions, type MessagePayload } from 'discord.js';
-import { truncateCodePoints, sendRichMessage, editRichMessage } from './discord.js';
+import { type InteractionUpdateOptions, type MessagePayload } from 'discord.js';
+import { truncateCodePoints, sendRichMessage, editRichMessage, buildPaginationRow } from './discord.js';
 import { createLogger } from './logger.js';
 
 const MESSAGES_PER_PAGE = 6;
@@ -74,23 +74,10 @@ function buildHistoryMessage(state: HistoryState) {
     const description = lines.join('\n\n') || '*No messages*';
 
     const components = totalPages > 1
-        ? [new ActionRowBuilder<ButtonBuilder>().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`history:${id}:prev`)
-                .setLabel('◀ Older')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(page === 0),
-            new ButtonBuilder()
-                .setCustomId(`history:${id}:noop`)
-                .setLabel(`${page + 1}/${totalPages}`)
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(true),
-            new ButtonBuilder()
-                .setCustomId(`history:${id}:next`)
-                .setLabel('Newer ▶')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(page >= totalPages - 1),
-        )]
+        ? [buildPaginationRow(page, totalPages, `history:${id}`, {
+            prevLabel: '◀ Older',
+            nextLabel: 'Newer ▶',
+        })]
         : [];
 
     return {

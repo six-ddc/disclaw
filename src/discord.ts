@@ -11,7 +11,7 @@ import { createWriteStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { Routes } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Routes } from 'discord.js';
 import type { Client, TextChannel } from 'discord.js';
 import { createLogger } from './logger.js';
 
@@ -305,6 +305,71 @@ export function splitMarkdown(text: string, maxLen = 2000): string[] {
 
     log.debug(`Markdown split complete: ${chunks.length} chunks from ${text.length} chars`);
     return chunks;
+}
+
+/**
+ * Build a standard ◀ / info / ▶ pagination button row.
+ *
+ * @param currentPage  Zero-based current page index
+ * @param totalPages   Total number of pages
+ * @param idPrefix     Custom ID prefix for buttons (e.g. "pager:p1", "history:abc")
+ * @param options      Optional overrides: labels, whether to show info button, extra buttons
+ */
+export function buildPaginationRow(
+    currentPage: number,
+    totalPages: number,
+    idPrefix: string,
+    options?: {
+        prevLabel?: string;
+        nextLabel?: string;
+        prevEmoji?: string;
+        nextEmoji?: string;
+        /** Show a disabled info button with "N / M" between prev/next (default: true) */
+        showInfo?: boolean;
+        /** Extra buttons prepended before the nav buttons */
+        extraButtonsBefore?: ButtonBuilder[];
+        /** Extra buttons appended after the nav buttons */
+        extraButtonsAfter?: ButtonBuilder[];
+    },
+): ActionRowBuilder<ButtonBuilder> {
+    const {
+        prevLabel, nextLabel,
+        prevEmoji = prevLabel ? undefined : '◀',
+        nextEmoji = nextLabel ? undefined : '▶',
+        showInfo = true,
+        extraButtonsBefore = [],
+        extraButtonsAfter = [],
+    } = options ?? {};
+
+    const prev = new ButtonBuilder()
+        .setCustomId(`${idPrefix}:prev`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage <= 0);
+    if (prevEmoji) prev.setEmoji(prevEmoji);
+    if (prevLabel) prev.setLabel(prevLabel);
+
+    const next = new ButtonBuilder()
+        .setCustomId(`${idPrefix}:next`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage >= totalPages - 1);
+    if (nextEmoji) next.setEmoji(nextEmoji);
+    if (nextLabel) next.setLabel(nextLabel);
+
+    const buttons: ButtonBuilder[] = [...extraButtonsBefore, prev];
+
+    if (showInfo) {
+        buttons.push(
+            new ButtonBuilder()
+                .setCustomId(`${idPrefix}:info`)
+                .setLabel(`${currentPage + 1} / ${totalPages}`)
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(true),
+        );
+    }
+
+    buttons.push(next, ...extraButtonsAfter);
+
+    return new ActionRowBuilder<ButtonBuilder>().addComponents(buttons);
 }
 
 /** Embed data structure for Discord API */

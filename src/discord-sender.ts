@@ -8,7 +8,7 @@
 import type { ClaudeMessage } from './message-converter.js';
 import { sendEmbed, editEmbed, sendToThread, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
 import {
-    escapeCodeBlock, formatToolName, truncateContent,
+    escapeCodeBlock, formatToolName, truncateContent, cleanContent,
     buildToolUseEmbed, buildToolResultField,
 } from './tool-embeds.js';
 import { createLogger } from './logger.js';
@@ -155,26 +155,24 @@ export function createClaudeSender(threadId: string) {
                     }
 
                     // Filter out system reminder content
-                    let cleanContent = msg.content;
-                    cleanContent = cleanContent.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
-                    cleanContent = cleanContent.replace(/\n\s*\n\s*\n/g, '\n\n');
+                    const cleaned = cleanContent(msg.content);
 
                     const tracked = toolUseId ? toolUseMessages.get(toolUseId) : undefined;
-                    log.debug(`Processing tool_result thread=${threadId} toolUseId=${toolUseId} hasTracked=${!!tracked} contentLength=${cleanContent.length}`);
+                    log.debug(`Processing tool_result thread=${threadId} toolUseId=${toolUseId} hasTracked=${!!tracked} contentLength=${cleaned.length}`);
 
                     if (tracked) {
                         // Merge result into the original tool_use embed
                         toolUseMessages.delete(toolUseId!);
                         const embed = tracked.embeds[0]!;
-                        const result = buildToolResultField(cleanContent);
+                        const result = buildToolResultField(cleaned);
                         const fields = embed.fields ?? [];
                         fields.push(result.field);
                         await editEmbed(threadId, tracked.messageId, [{ ...embed, fields, color: result.color }]);
                         log(`Updated tool_use embed with result thread=${threadId} toolUseId=${toolUseId} messageId=${tracked.messageId}`);
-                    } else if (cleanContent) {
+                    } else if (cleaned) {
                         // Fallback: no matching tool_use found, send as separate message
-                        log.warn(`No matching tool_use found for tool_result, sending as separate embed thread=${threadId} toolUseId=${toolUseId} contentLength=${cleanContent.length}`);
-                        const result = buildToolResultField(cleanContent);
+                        log.warn(`No matching tool_use found for tool_result, sending as separate embed thread=${threadId} toolUseId=${toolUseId} contentLength=${cleaned.length}`);
+                        const result = buildToolResultField(cleaned);
                         await sendEmbed(threadId, [{
                             color: result.color,
                             title: result.field.name,

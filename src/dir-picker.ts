@@ -15,7 +15,8 @@ import {
     type MessagePayload,
 } from 'discord.js';
 import { readdirSync, statSync } from 'fs';
-import { resolve, dirname, basename } from 'path';
+import { resolve, dirname } from 'path';
+import { buildPaginationRow } from './discord.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('dir-picker');
@@ -88,24 +89,18 @@ function buildPickerMessage(pick: PendingPick) {
 
     // Navigation row: Up | Prev | Next
     const isRoot = pick.currentDir === '/';
+    const upButton = new ButtonBuilder()
+        .setCustomId(`dirpick:${pick.pickId}:up`)
+        .setLabel('↑ Up')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(isRoot);
     rows.push(
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`dirpick:${pick.pickId}:up`)
-                .setLabel('↑ Up')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(isRoot),
-            new ButtonBuilder()
-                .setCustomId(`dirpick:${pick.pickId}:prev`)
-                .setLabel('◀')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(page === 0),
-            new ButtonBuilder()
-                .setCustomId(`dirpick:${pick.pickId}:next`)
-                .setLabel('▶')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(page >= totalPages - 1),
-        )
+        buildPaginationRow(page, totalPages, `dirpick:${pick.pickId}`, {
+            prevLabel: '◀',
+            nextLabel: '▶',
+            showInfo: false,
+            extraButtonsBefore: [upButton],
+        }),
     );
 
     // Action row: Select | Cancel

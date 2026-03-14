@@ -13,11 +13,10 @@
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeMessage } from './message-converter.js';
 import type { ButtonInteraction } from 'discord.js';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
-import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
+import { sendRichMessage, editRichMessage, truncateCodePoints, buildPaginationRow, type EmbedData } from './discord.js';
 import { getThreadMapping, savePagerMessage, getPagerMessage } from './db.js';
 import {
-    escapeCodeBlock, formatToolName, truncateContent,
+    escapeCodeBlock, formatToolName, truncateContent, cleanContent,
     buildToolUseEmbed, buildToolResultField, TOOL_RESULT_COLOR, TOOL_DONE_COLOR,
 } from './tool-embeds.js';
 import { createLogger } from './logger.js';
@@ -60,13 +59,6 @@ function truncatePreview(content: string, maxLines = 10, maxChars = 800): string
     const { preview, isTruncated, totalLines } = truncateContent(content, maxLines, maxChars);
     const remaining = totalLines - maxLines;
     return isTruncated && remaining > 0 ? `${preview}\n(+${remaining} more lines)` : preview;
-}
-
-/** Strip system-reminder tags and normalize whitespace */
-function cleanContent(text: string): string {
-    return text
-        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-        .replace(/\n\s*\n\s*\n/g, '\n\n');
 }
 
 // =========================================================================
@@ -128,49 +120,16 @@ function buildPageEmbed(page: PagerPage, pageIdx: number, total: number): EmbedD
 // Buttons
 // =========================================================================
 
-function buildLiveButtons(id: string, currentPage: number, total: number): ActionRowBuilder<ButtonBuilder> {
-    return new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`pager:${id}:prev`)
-            .setEmoji('◀')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(currentPage <= 0),
-        new ButtonBuilder()
-            .setCustomId(`pager:${id}:info`)
-            .setLabel(`${currentPage + 1} / ${total}`)
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(true),
-        new ButtonBuilder()
-            .setCustomId(`pager:${id}:next`)
-            .setEmoji('▶')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(currentPage >= total - 1),
-    );
+function buildLiveButtons(id: string, currentPage: number, total: number) {
+    return buildPaginationRow(currentPage, total, `pager:${id}`);
 }
 
 /** Button ID format: pgr:<sessionId>:<msgOffset>:<msgLimit>:<pageIdx>:<action> */
 function buildPersistentButtons(
     sessionId: string, pageIdx: number, total: number,
     msgOffset: number, msgLimit: number,
-): ActionRowBuilder<ButtonBuilder> {
-    const prefix = `pgr:${sessionId}:${msgOffset}:${msgLimit}`;
-    return new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-            .setCustomId(`${prefix}:${pageIdx}:prev`)
-            .setEmoji('◀')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(pageIdx <= 0),
-        new ButtonBuilder()
-            .setCustomId(`${prefix}:${pageIdx}:info`)
-            .setLabel(`${pageIdx + 1} / ${total}`)
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(true),
-        new ButtonBuilder()
-            .setCustomId(`${prefix}:${pageIdx}:next`)
-            .setEmoji('▶')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(pageIdx >= total - 1),
-    );
+) {
+    return buildPaginationRow(pageIdx, total, `pgr:${sessionId}:${msgOffset}:${msgLimit}:${pageIdx}`);
 }
 
 // =========================================================================

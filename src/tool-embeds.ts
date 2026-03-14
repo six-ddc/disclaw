@@ -41,6 +41,13 @@ export function getLangTag(filePath: string): string {
     return EXT_TO_LANG[ext] || '';
 }
 
+/** Strip system-reminder tags and normalize whitespace */
+export function cleanContent(text: string): string {
+    return text
+        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+        .replace(/\n\s*\n\s*\n/g, '\n\n');
+}
+
 /** Truncate content with smart preview */
 export function truncateContent(
     content: string, maxLines = 15, maxChars = 1000,

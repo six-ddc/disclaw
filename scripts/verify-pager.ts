@@ -11,6 +11,7 @@
  */
 
 import { getSessionMessages } from '@anthropic-ai/claude-agent-sdk';
+import { cleanContent } from '../src/tool-embeds.js';
 
 // =========================================================================
 // Copy of pager helper functions (to test in isolation)
@@ -40,13 +41,6 @@ function truncatePreview(content: string, maxLines = 10, maxChars = 800): string
         : truncated;
     const remaining = lines.length - maxLines;
     return remaining > 0 ? `${result}\n(+${remaining} more lines)` : result;
-}
-
-function cleanContent(text: string): string {
-    return text
-        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-        .replace(/\n\s*\n\s*\n/g, '\n\n')
-        .trim();
 }
 
 function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }>): PagerPage[] {
