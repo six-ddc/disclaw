@@ -18,8 +18,10 @@ import {
     type ModalSubmitInteraction,
     type Interaction,
 } from 'discord.js';
-import { sendRichMessage, editRichMessage, truncateCodePoints, type EmbedData } from './discord.js';
+import { sendRichMessage, editRichMessage, scheduleDelete, truncateCodePoints, type EmbedData } from './discord.js';
 import type { PermissionResult, CanUseTool, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
+import { updateThreadPermissionMode } from './db.js';
+import type { PermissionMode } from './types.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('user-input');
@@ -43,7 +45,7 @@ interface AskUserQuestionItem {
 }
 
 interface PendingRequest {
-    type: 'approval' | 'ask_user';
+    type: 'approval' | 'ask_user' | 'exit_plan';
     threadId: string;
     requestId: string;
     resolve: (result: PermissionResult) => void;
@@ -59,6 +61,8 @@ interface PendingRequest {
     currentIndex?: number;
     answers?: Record<string, string>;
     currentMsgId?: string;
+    // ExitPlanMode specific:
+    plan?: string;
 }
 
 // =========================================================================
@@ -66,6 +70,18 @@ interface PendingRequest {
 // =========================================================================
 
 const pendingRequests = new Map<string, PendingRequest>();
+
+// =========================================================================
+// PLAN APPROVAL STATE
+// =========================================================================
+
+interface PlanApprovalState {
+    plan: string;
+    mode: PermissionMode;
+}
+
+/** Pending plan approvals for "Accept Edits (New)" — runner picks these up after query ends */
+export const pendingPlanApprovals = new Map<string, PlanApprovalState>();
 
 // =========================================================================
 // canUseTool FACTORY
@@ -91,6 +107,13 @@ export function createCanUseTool(threadId: string): CanUseTool {
         if (toolName === 'AskUserQuestion') {
             log(`AskUserQuestion prompted in thread ${threadId}`);
             return handleAskUserQuestion(threadId, input);
+        }
+
+        // ExitPlanMode — show plan review UI
+        if (toolName === 'ExitPlanMode') {
+            log(`ExitPlanMode prompted in thread ${threadId}, input keys: ${Object.keys(input).join(', ')}`);
+            log.debug(`ExitPlanMode input: ${JSON.stringify(input).slice(0, 500)}`);
+            return handleExitPlanMode(threadId, input);
         }
 
         // Show approval UI in Discord, pass suggestions for "Always Allow"
@@ -266,6 +289,197 @@ async function sendQuestionUI(request: PendingRequest): Promise<void> {
 }
 
 // =========================================================================
+// EXIT PLAN MODE
+// =========================================================================
+
+async function handleExitPlanMode(
+    threadId: string,
+    input: Record<string, unknown>,
+): Promise<PermissionResult> {
+    const plan = typeof input.plan === 'string' ? input.plan : '';
+    const requestId = crypto.randomUUID().slice(0, 8);
+    log(`ExitPlanMode created: requestId=${requestId}, thread=${threadId}, planLen=${plan.length}`);
+
+    return new Promise<PermissionResult>((resolve) => {
+        const timeout = setTimeout(() => {
+            const req = pendingRequests.get(requestId);
+            if (req) {
+                log.warn(`ExitPlanMode timed out after ${REQUEST_TIMEOUT_MS / 1000}s: requestId=${requestId}, thread=${threadId}`);
+                pendingRequests.delete(requestId);
+                expireRequest(req);
+                resolve({ behavior: 'deny', message: 'Timed out waiting for plan review.' });
+            }
+        }, REQUEST_TIMEOUT_MS);
+
+        const request: PendingRequest = {
+            type: 'exit_plan',
+            threadId,
+            requestId,
+            resolve,
+            timeout,
+            plan,
+        };
+
+        pendingRequests.set(requestId, request);
+        sendPlanReviewUI(request);
+    });
+}
+
+async function sendPlanReviewUI(request: PendingRequest): Promise<void> {
+    const { threadId, requestId, plan } = request;
+    log.debug(`Rendering plan review UI: requestId=${requestId}, thread=${threadId}`);
+
+    const description = plan
+        ? truncateCodePoints(plan, 4000)
+        : '*Claude is ready to proceed.*';
+
+    const embed: EmbedData = {
+        color: 0x5865f2, // blurple
+        title: 'Plan Review',
+        description,
+        footer: { text: 'Would you like to proceed?' },
+    };
+
+    const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`plan:${requestId}:new_session`)
+            .setLabel('Accept Edits (New)')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`plan:${requestId}:keep_edits`)
+            .setLabel('Accept Edits')
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`plan:${requestId}:manual`)
+            .setLabel('Manual Approval')
+            .setStyle(ButtonStyle.Primary),
+    );
+
+    const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`plan:${requestId}:keep_planning`)
+            .setLabel('Keep Planning')
+            .setStyle(ButtonStyle.Secondary),
+    );
+
+    try {
+        const msgId = await sendRichMessage(threadId, { embeds: [embed], components: [row1, row2] });
+        request.currentMsgId = msgId;
+    } catch (err) {
+        log.error(`Failed to send plan review UI: requestId=${requestId}, thread=${threadId}, error=${err}`);
+    }
+}
+
+// ---- Plan: Button ----
+
+async function handlePlanButton(interaction: ButtonInteraction): Promise<boolean> {
+    const parts = interaction.customId.split(':');
+    // plan:{requestId}:{action}
+    if (parts.length < 3) return false;
+
+    const requestId = parts[1]!;
+    const action = parts[2]!;
+    const request = pendingRequests.get(requestId);
+
+    if (!request || request.type !== 'exit_plan') {
+        log.debug(`Plan button interaction for expired request: requestId=${requestId}`);
+        await interaction.reply({ content: 'This plan review has expired.', ephemeral: true });
+        return true;
+    }
+
+    if (action === 'new_session') {
+        pendingRequests.delete(requestId);
+        clearTimeout(request.timeout);
+        await interaction.deferUpdate();
+        await disableComponents(request, `New session with Accept Edits by ${interaction.user.tag}`);
+        log(`Plan: new_session selected: requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}`);
+        // Store plan for runner to pick up and auto-submit as new session
+        pendingPlanApprovals.set(request.threadId, {
+            plan: request.plan || '',
+            mode: 'acceptEdits',
+        });
+        // Deny so the current SDK query ends; runner will start a new one
+        request.resolve({ behavior: 'deny', message: 'Executing plan in new session.' });
+        return true;
+    }
+
+    if (action === 'keep_edits') {
+        pendingRequests.delete(requestId);
+        clearTimeout(request.timeout);
+        await interaction.deferUpdate();
+        await disableComponents(request, `Accept Edits (same session) by ${interaction.user.tag}`);
+        log(`Plan: keep_edits selected: requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}`);
+        updateThreadPermissionMode(request.threadId, 'acceptEdits');
+        request.resolve({
+            behavior: 'allow',
+            updatedPermissions: [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }],
+        });
+        return true;
+    }
+
+    if (action === 'manual') {
+        pendingRequests.delete(requestId);
+        clearTimeout(request.timeout);
+        await interaction.deferUpdate();
+        await disableComponents(request, `Manual Approval by ${interaction.user.tag}`);
+        log(`Plan: manual selected: requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}`);
+        updateThreadPermissionMode(request.threadId, null);
+        request.resolve({
+            behavior: 'allow',
+            updatedPermissions: [{ type: 'setMode', mode: 'default', destination: 'session' }],
+        });
+        return true;
+    }
+
+    if (action === 'keep_planning') {
+        // Show modal for feedback
+        log.debug(`Showing keep planning modal: requestId=${requestId}`);
+        const modal = new ModalBuilder()
+            .setCustomId(`plan:${requestId}:feedback:modal`)
+            .setTitle('Keep Planning');
+
+        const textInput = new TextInputBuilder()
+            .setCustomId('feedback')
+            .setLabel('Feedback for Claude (optional)')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(false);
+
+        modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(textInput));
+        await interaction.showModal(modal);
+        return true;
+    }
+
+    return false;
+}
+
+// ---- Plan: Modal Submit ----
+
+async function handlePlanModalSubmit(interaction: ModalSubmitInteraction): Promise<boolean> {
+    const parts = interaction.customId.split(':');
+    // plan:{requestId}:feedback:modal
+    if (parts.length < 4) return false;
+
+    const requestId = parts[1]!;
+    const request = pendingRequests.get(requestId);
+
+    if (!request || request.type !== 'exit_plan') {
+        log.debug(`Plan modal submit for expired request: requestId=${requestId}`);
+        await interaction.reply({ content: 'This plan review has expired.', ephemeral: true });
+        return true;
+    }
+
+    pendingRequests.delete(requestId);
+    clearTimeout(request.timeout);
+
+    const feedback = interaction.fields.getTextInputValue('feedback') || 'Keep planning.';
+    await interaction.deferUpdate();
+    await disableComponents(request, `Keep planning by ${interaction.user.tag}: ${feedback}`);
+    log(`Plan: keep_planning selected: requestId=${requestId}, thread=${request.threadId}, user=${interaction.user.tag}, feedback="${feedback}"`);
+    request.resolve({ behavior: 'deny', message: feedback });
+    return true;
+}
+
+// =========================================================================
 // TOOL APPROVAL
 // =========================================================================
 
@@ -367,6 +581,9 @@ export async function handleUserInputInteraction(interaction: Interaction): Prom
         if (customId.startsWith('approve:')) {
             return handleApproveButton(interaction as ButtonInteraction);
         }
+        if (customId.startsWith('plan:')) {
+            return handlePlanButton(interaction as ButtonInteraction);
+        }
     }
 
     // String select menu interactions
@@ -382,6 +599,9 @@ export async function handleUserInputInteraction(interaction: Interaction): Prom
         const customId = interaction.customId;
         if (customId.startsWith('ask:') || customId.startsWith('approve:')) {
             return handleModalSubmit(interaction as ModalSubmitInteraction);
+        }
+        if (customId.startsWith('plan:')) {
+            return handlePlanModalSubmit(interaction as ModalSubmitInteraction);
         }
     }
 
@@ -641,6 +861,7 @@ async function disableComponents(request: PendingRequest, footerText: string): P
                 description: footerText,
             }],
         });
+        scheduleDelete(request.threadId, request.currentMsgId);
     } catch (err) {
         log.error(`Failed to disable components: requestId=${request.requestId}, thread=${request.threadId}, error=${err}`);
     }
@@ -657,6 +878,7 @@ async function expireRequest(request: PendingRequest): Promise<void> {
                     description: '(timed out)',
                 }],
             });
+            scheduleDelete(request.threadId, request.currentMsgId);
         } catch (err) {
             log.error(`Failed to expire request UI: requestId=${request.requestId}, thread=${request.threadId}, error=${err}`);
         }
@@ -679,5 +901,6 @@ export function cleanupThread(threadId: string): void {
     if (cleaned > 0) {
         log(`Cleaned up ${cleaned} pending request(s) for thread ${threadId}`);
     }
+    // Don't clean pendingPlanApprovals here — runner needs to pick them up after query ends
 }
 

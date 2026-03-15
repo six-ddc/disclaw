@@ -493,6 +493,16 @@ export async function deleteMessage(channelId: string, messageId: string): Promi
     }
 }
 
+/**
+ * Schedule a message for deletion after a delay.
+ * Fire-and-forget — failures are silently ignored.
+ */
+export function scheduleDelete(channelId: string, messageId: string, delayMs = 10_000): void {
+    setTimeout(() => {
+        deleteMessage(channelId, messageId).catch(() => {});
+    }, delayMs);
+}
+
 export async function addReaction(channelId: string, messageId: string, emoji: string): Promise<void> {
     const channel = await getChannel(channelId);
     await channel.messages.react(messageId, emoji);

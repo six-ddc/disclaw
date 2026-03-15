@@ -6,7 +6,7 @@
  */
 
 import type { ClaudeMessage } from './message-converter.js';
-import { sendEmbed as _sendEmbed, editEmbed, sendToThread, sendRichMessage, deleteMessage, truncateCodePoints, type EmbedData } from './discord.js';
+import { sendEmbed as _sendEmbed, editEmbed, sendToThread, sendRichMessage, deleteMessage, scheduleDelete, truncateCodePoints, type EmbedData } from './discord.js';
 import {
     escapeCodeBlock, formatToolName, truncateContent, cleanContent,
     buildToolUseEmbed, buildToolResultField,
@@ -89,16 +89,16 @@ function formatStopReason(stopReason?: string, sdkSubtype?: string): string | nu
 const lastStatusMessage = new Map<string, { messageId: string; timer: ReturnType<typeof setTimeout> }>();
 
 function scheduleStatusDelete(threadId: string, messageId: string) {
-    // Delete previous status message immediately
+    // Delete previous status message immediately when a new one replaces it
     const prev = lastStatusMessage.get(threadId);
     if (prev) {
         clearTimeout(prev.timer);
         deleteMessage(threadId, prev.messageId).catch(() => {});
     }
-    // Auto-delete this one after 30s
+    // Auto-delete after 10s, with cancellable timer for replace-on-arrival
     const timer = setTimeout(() => {
         lastStatusMessage.delete(threadId);
-        deleteMessage(threadId, messageId).catch(() => {});
+        scheduleDelete(threadId, messageId, 0);
     }, 10_000);
     lastStatusMessage.set(threadId, { messageId, timer });
 }

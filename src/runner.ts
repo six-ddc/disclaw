@@ -10,8 +10,8 @@ import { createClaudeSender } from './discord-sender.js';
 import { convertToClaudeMessages } from './message-converter.js';
 import { sendToThread, editMessage, renameThread, truncateCodePoints, addReaction, removeReaction } from './discord.js';
 import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
-import { getThreadMapping, resolveSessionState, updateThreadSession, getThreadTitle, setThreadTitle } from './db.js';
-import { createCanUseTool, cleanupThread } from './user-input.js';
+import { getThreadMapping, resolveSessionState, updateThreadSession, updateThreadPermissionMode, getThreadTitle, setThreadTitle } from './db.js';
+import { createCanUseTool, cleanupThread, pendingPlanApprovals } from './user-input.js';
 import type { MultimodalPrompt, ContentBlock } from './attachment-handler.js';
 import { createToolPager } from './tool-pager.js';
 import type { DisplayMode, PermissionMode } from './types.js';
@@ -328,6 +328,27 @@ class JobRunner {
                 });
             }
 
+            // Check for ExitPlanMode "new session" approval
+            const planApproval = pendingPlanApprovals.get(job.threadId);
+            if (planApproval) {
+                pendingPlanApprovals.delete(job.threadId);
+                updateThreadSession(job.threadId, null);
+                updateThreadPermissionMode(job.threadId, planApproval.mode);
+                log(`Plan approval: auto-submitting new session for thread=${job.threadId}, mode=${planApproval.mode}`);
+
+                const planPrompt = `Implement the following plan:\n\n${planApproval.plan}`;
+                this.submit({
+                    prompt: planPrompt,
+                    threadId: job.threadId,
+                    userId: job.userId,
+                    username: job.username,
+                    workingDir: job.workingDir,
+                    model: job.model,
+                    permissionMode: planApproval.mode,
+                    createMcpServers: job.createMcpServers,
+                });
+            }
+
             // Generate title on first completion (async, non-blocking)
             if (!getThreadTitle(job.threadId) && lastResultText) {
                 log.debug(`Triggering title generation for thread=${job.threadId}`);
@@ -343,6 +364,7 @@ class JobRunner {
         } catch (error) {
             this.activeQueries.delete(job.threadId);
             cleanupThread(job.threadId);
+            pendingPlanApprovals.delete(job.threadId);
             // Remove eyes reaction on error too
             if (job.eyesReaction) {
                 removeReaction(job.eyesReaction.channelId, job.eyesReaction.messageId, '👀').catch(() => {});
