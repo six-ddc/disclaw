@@ -190,7 +190,7 @@ function buildSpecializedFields(
         return { fields };
     }
 
-    if (toolName === 'mcp__disclaw__cron_delete') {
+    if (toolName === 'mcp__disclaw__cron_delete' || toolName === 'mcp__disclaw__cron_run_now') {
         const jobId = input.job_id as string | undefined;
         return { description: jobId ? `Job: \`${jobId}\`` : undefined };
     }

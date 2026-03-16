@@ -258,6 +258,28 @@ export function createDisclawMcpServer(
         },
     );
 
+    const cronRunNowTool = tool(
+        'cron_run_now',
+        'Immediately trigger a scheduled task to run now, outside its normal schedule. Useful for retrying failed runs or testing.',
+        {
+            job_id: z.string().describe('The job ID to run immediately'),
+        },
+        async (args) => {
+            log(`MCP cron_run_now invoked: jobId=${args.job_id}`);
+            const ran = sched.runNow(args.job_id);
+            if (!ran) {
+                log.warn(`MCP cron_run_now: job not found: ${args.job_id}`);
+                return {
+                    content: [{ type: 'text' as const, text: `Job not found: ${args.job_id}` }],
+                    isError: true,
+                };
+            }
+            return {
+                content: [{ type: 'text' as const, text: `Triggered immediate run for job ${args.job_id}` }],
+            };
+        },
+    );
+
     // =====================================================================
     // Thread tools
     // =====================================================================
@@ -441,6 +463,6 @@ export function createDisclawMcpServer(
 
     return createSdkMcpServer({
         name: 'disclaw',
-        tools: [cronCreateTool, cronListTool, cronDeleteTool, cronUpdateTool, titleGenerateTool, discordSendImageTool, discordSendMediaTool, discordSendFileTool],
+        tools: [cronCreateTool, cronListTool, cronDeleteTool, cronUpdateTool, cronRunNowTool, titleGenerateTool, discordSendImageTool, discordSendMediaTool, discordSendFileTool],
     });
 }
