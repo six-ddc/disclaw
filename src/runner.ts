@@ -8,7 +8,7 @@
 import { queryClaudeSDK, generateTitle } from './claude-client.js';
 import { createClaudeSender } from './discord-sender.js';
 import { convertToClaudeMessages } from './message-converter.js';
-import { sendToThread, editMessage, renameThread, truncateCodePoints, addReaction, removeReaction } from './discord.js';
+import { sendToThread, editMessage, renameThread, truncateCodePoints, addReaction, removeReaction, sendTyping } from './discord.js';
 import { type Query, type ModelInfo, type McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { getThreadMapping, resolveSessionState, updateThreadSession, updateThreadPermissionMode, getThreadTitle, setThreadTitle } from './db.js';
 import { createCanUseTool, cleanupThread, pendingPlanApprovals } from './user-input.js';
@@ -198,6 +198,7 @@ class JobRunner {
         let lastResultText = '';
 
         const canUseTool = createCanUseTool(job.threadId);
+        let lastTypingTime = 0;
 
         try {
             const resultSessionId = await queryClaudeSDK({
@@ -225,6 +226,13 @@ class JobRunner {
                 },
                 onMessage: async (sdkMessage) => {
                     try {
+                        // Keep typing indicator alive while processing (throttled to once per 5s)
+                        const now = Date.now();
+                        if (now - lastTypingTime >= 5000) {
+                            lastTypingTime = now;
+                            sendTyping(job.threadId);
+                        }
+
                         // Capture the final result text for status message update
                     if (sdkMessage.type === 'result' && sdkMessage.subtype === 'success') {
                         lastResultText = sdkMessage.result;

@@ -24,7 +24,7 @@ import {
     type CronJob,
 } from './db.js';
 import { sendEmbed, truncateCodePoints } from './discord.js';
-import { sendCronControlPanel } from './cron-buttons.js';
+import { buildControlEmbed, buildButtons, updateCronControlPanel } from './cron-buttons.js';
 import { createLogger } from './logger.js';
 import { resolveWorkingDirWithMapping } from './working-dir.js';
 
@@ -137,17 +137,8 @@ export class CronScheduler {
             description: `**Scheduled Run** · ${timeStr}`,
         }]).catch(err => log.error(`Failed to send separator for job ${jobId}: ${err}`));
 
-        // Resolve parent channel for status message updates
-        // Thread ID === starter message ID (Discord creates threads from messages)
-        let parentChannelId: string | undefined;
-        try {
-            const thread = await this.client.channels.fetch(job.thread_id);
-            parentChannelId = thread?.isThread() ? thread.parentId || undefined : undefined;
-        } catch (err) {
-            log.warn(`Failed to fetch thread ${job.thread_id} for parent channel: ${err}`);
-        }
-
         // Submit to runner (no sessionId — SDK auto-generates; persistSession: false to avoid filesystem clutter)
+        // No statusMessageId/parentChannelId — starter message is the control panel, not overwritten
         runner.submit({
             prompt: job.prompt,
             threadId: job.thread_id,
@@ -158,8 +149,6 @@ export class CronScheduler {
             username: 'cron',
             workingDir,
             model: mapping?.model || undefined,
-            parentChannelId,
-            statusMessageId: parentChannelId ? job.thread_id : undefined,
             onComplete: (error) => {
                 if (error) {
                     const count = (this.failures.get(jobId) || 0) + 1;
@@ -169,6 +158,7 @@ export class CronScheduler {
                     if (count >= MAX_FAILURES) {
                         log.warn(`Auto-pausing job ${jobId} after ${MAX_FAILURES} consecutive failures`);
                         this.pause(jobId);
+                        updateCronControlPanel(jobId).catch(err => log.error(`Failed to update panel after auto-pause for job ${jobId}: ${err}`));
                         sendEmbed(job.thread_id, [{
                             color: 0xff4444,
                             title: 'Scheduled Task Auto-Paused',
@@ -276,14 +266,24 @@ export class CronScheduler {
             50,
         );
 
-        const statusMessage = await parentChannel.send(
-            `Scheduled task created: \`${params.schedule}\``
-        );
+        // Store cron job first (need jobId for buttons), then build panel
+        createCronJob(jobId, '', params.creatorId, params.schedule, params.prompt, params.name);
+        const job = getCronJob(jobId)!;
+        this.register(job);
+
+        // Send control panel as starter message, then create thread from it
+        const nextRun = this.getNextRun(jobId);
+        const embed = buildControlEmbed(job, nextRun);
+        const buttons = buildButtons(job);
+        const statusMessage = await parentChannel.send({ embeds: [embed], components: [buttons] });
 
         const thread = await statusMessage.startThread({
             name: threadName,
             autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
         });
+
+        // Update cron job with actual thread ID
+        db.run('UPDATE cron_jobs SET thread_id = ? WHERE job_id = ?', [thread.id, jobId]);
 
         // Store thread mapping (empty session_id — first message or cron execution will create one)
         // Pre-set title to prevent auto-title generation from overriding it
@@ -291,17 +291,6 @@ export class CronScheduler {
             'INSERT INTO threads (thread_id, session_id, working_dir, model, title, display_mode) VALUES (?, ?, ?, ?, ?, ?)',
             [thread.id, '', params.workingDir, params.model || null, threadName, 'simple']
         );
-
-        // Store cron job
-        createCronJob(jobId, thread.id, params.creatorId, params.schedule, params.prompt, params.name);
-
-        // Register croner
-        const job = getCronJob(jobId)!;
-        this.register(job);
-
-        // Send control panel
-        const nextRun = this.getNextRun(jobId);
-        await sendCronControlPanel(thread.id, job, nextRun);
 
         log(`Created job ${jobId} in thread ${thread.id}`);
         return { jobId, threadId: thread.id };

@@ -16,6 +16,7 @@ import {
     type McpSdkServerConfigWithInstance,
 } from '@anthropic-ai/claude-agent-sdk';
 import { getCronScheduler } from './cron.js';
+import { updateCronControlPanel, markPanelDeleted } from './cron-buttons.js';
 import {
     getCronJob,
     listCronJobs,
@@ -174,6 +175,7 @@ export function createDisclawMcpServer(
         },
         async (args) => {
             log(`MCP cron_delete invoked: jobId=${args.job_id}`);
+            const job = getCronJob(args.job_id);
             const deleted = sched.delete(args.job_id);
             if (!deleted) {
                 log.warn(`MCP cron_delete: job not found: ${args.job_id}`);
@@ -181,6 +183,9 @@ export function createDisclawMcpServer(
                     content: [{ type: 'text' as const, text: `Job not found: ${args.job_id}` }],
                     isError: true,
                 };
+            }
+            if (job) {
+                await markPanelDeleted(job).catch(err => log.error(`Failed to mark panel deleted for job ${args.job_id}: ${err}`));
             }
             return {
                 content: [{ type: 'text' as const, text: `Deleted job ${args.job_id}` }],
@@ -241,6 +246,9 @@ export function createDisclawMcpServer(
                 await renameThread(job.thread_id, newThreadName).catch(err => log.error(`Failed to rename thread for job ${args.job_id}: ${err}`));
                 setThreadTitle(job.thread_id, newThreadName);
             }
+
+            // Update the control panel to reflect changes
+            await updateCronControlPanel(args.job_id).catch(err => log.error(`Failed to update panel for job ${args.job_id}: ${err}`));
 
             const changed = Object.keys(fields).join(', ');
             log(`MCP cron_update succeeded for job ${args.job_id}: updated ${changed}`);

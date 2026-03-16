@@ -22,7 +22,7 @@ const log = createLogger('cron-buttons');
 const TIMEZONE = process.env.TZ;
 
 /** Build the control panel embed for a cron job */
-function buildControlEmbed(job: CronJob, nextRun?: Date | null): EmbedData {
+export function buildControlEmbed(job: CronJob, nextRun?: Date | null): EmbedData {
     log.debug(`Building control embed for job ${job.job_id} (enabled=${job.enabled})`);
     const status = job.enabled ? 'Active' : 'Paused';
     const statusIcon = job.enabled ? '\u{1F7E2}' : '\u{23F8}\u{FE0F}';
@@ -56,7 +56,7 @@ function buildControlEmbed(job: CronJob, nextRun?: Date | null): EmbedData {
 }
 
 /** Build action row with buttons */
-function buildButtons(job: CronJob): ActionRowBuilder<ButtonBuilder> {
+export function buildButtons(job: CronJob): ActionRowBuilder<ButtonBuilder> {
     log.debug(`Building buttons for job ${job.job_id} (enabled=${job.enabled})`);
     const row = new ActionRowBuilder<ButtonBuilder>();
 
@@ -108,6 +108,35 @@ export async function sendCronControlPanel(
         components: [row],
     });
     log(`Sent control panel for job ${job.job_id} to thread ${threadId}`);
+}
+
+/** Update the cron control panel (starter message) for a job */
+export async function updateCronControlPanel(jobId: string): Promise<void> {
+    const job = getCronJob(jobId);
+    if (!job) {
+        log.warn(`Cannot update panel for job ${jobId}: not found`);
+        return;
+    }
+    const nextRun = getCronScheduler().getNextRun(jobId);
+    const embed = buildControlEmbed(job, nextRun);
+    const row = buildButtons(job);
+    // Thread starter message ID === thread ID in Discord
+    await editRichMessage(job.thread_id, job.thread_id, { embeds: [embed], components: [row] });
+    log(`Updated control panel for job ${jobId}`);
+}
+
+/** Mark the control panel as deleted (grey embed, no buttons) */
+export async function markPanelDeleted(job: CronJob): Promise<void> {
+    await editRichMessage(job.thread_id, job.thread_id, {
+        embeds: [{
+            color: 0x888888,
+            title: 'Scheduled Task (Deleted)',
+            description: `~~${truncateCodePoints(job.prompt, 200)}~~`,
+            footer: { text: `Job ID: ${job.job_id}` },
+        }],
+        components: [],
+    });
+    log(`Marked panel deleted for job ${job.job_id}`);
 }
 
 /** Handle cron button interactions. Returns true if handled. */

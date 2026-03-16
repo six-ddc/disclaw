@@ -393,12 +393,13 @@ export async function sendToThread(threadId: string, content: string, quiet?: bo
         return;
     }
     const channel = await getChannel(threadId);
-    const chunks = splitMarkdown(content, 2000);
+    // Apply URL wrapping before splitting so chunk sizes account for the added <> characters
+    const processed = suppressLinkPreviews ? wrapUrls(content) : content;
+    const chunks = splitMarkdown(processed, 2000);
     log.debug(`Sending message to thread ${threadId} (${content.length} chars, ${chunks.length} chunks)`);
     for (const chunk of chunks) {
         if (!chunk.trim()) continue;
-        const text = suppressLinkPreviews ? wrapUrls(chunk) : chunk;
-        await channel.send(quiet ? { content: text, flags: MessageFlags.SuppressNotifications } : text);
+        await channel.send(quiet ? { content: chunk, flags: MessageFlags.SuppressNotifications } : chunk);
     }
     log(`Message sent to thread ${threadId} (${content.length} chars, ${chunks.length} chunks)`);
 }
@@ -620,6 +621,20 @@ export async function sendFileAttachment(threadId: string, filePath: string, opt
     });
     log(`File attachment sent to thread ${threadId} (path=${filePath}, messageId=${msg.id})`);
     return msg.id;
+}
+
+/**
+ * Send a typing indicator to a channel/thread.
+ * The indicator lasts ~10 seconds or until a message is sent.
+ * Failures are silently ignored (non-critical).
+ */
+export async function sendTyping(channelId: string): Promise<void> {
+    try {
+        const channel = await getChannel(channelId);
+        await channel.sendTyping();
+    } catch {
+        // Non-critical — don't log noise for typing failures
+    }
 }
 
 export async function removeReaction(channelId: string, messageId: string, emoji: string): Promise<void> {

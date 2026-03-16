@@ -235,10 +235,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
             // React with eyes to acknowledge receipt
             addReaction(thread.id, message.id, '👀').catch(() => {});
 
-            // Show typing indicator
-            log.debug(`Sending typing indicator: thread=${thread.id}`);
-            await thread.sendTyping();
-
             // For forum threads with empty session (after clear or fresh adoption),
             // include forum post title/body so the agent knows the topic
             const isForumThread = thread.parent?.type === ChannelType.GuildForum || thread.parent?.type === ChannelType.GuildMedia;
@@ -356,9 +352,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
     );
 
     log(`Thread ${existingThread ? 'adopted' : 'created'}: thread=${thread.id} channel=${channelId} user=${message.author.tag} workingDir=${workingDir}${preservedTitle ? ` title="${preservedTitle}"` : ''}`);
-
-    log.debug(`Sending typing indicator: thread=${thread.id}`);
-    await thread.sendTyping();
 
     log(`Job submitted: thread=${thread.id} user=${message.author.tag} workingDir=${workingDir} resume=false`);
     runner.submit({
