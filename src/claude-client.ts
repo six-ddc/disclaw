@@ -15,6 +15,15 @@ const TIMEZONE = process.env.TZ;
 
 const log = createLogger('claude-client');
 
+/** Thrown when the SDK query stalls (no messages for STALL_TIMEOUT_MS). */
+export class StallError extends Error {
+    override name = 'StallError';
+}
+
+const STALL_TIMEOUT_MS = 2 * 60 * 1000;  // 2 minutes
+const STALL_CHECK_INTERVAL_MS = 30 * 1000;  // check every 30s
+const STALL_GRACE_MS = 10 * 1000;  // grace period after interrupt before force close
+
 // Lazy pre-flight check: ensure claude binary is available before first query
 // SDK query() silently hangs if claude is not in PATH — fail fast instead
 import { execSync } from 'child_process';
@@ -45,6 +54,8 @@ export interface QueryOptions {
     onQuery?: (q: Query) => void;
     abortController?: AbortController;
     canUseTool?: CanUseTool;
+    /** Called with a reset function that pauses the watchdog timer (e.g. during canUseTool waits) */
+    onWatchdogReset?: (resetFn: () => void) => void;
 }
 
 /**
@@ -58,7 +69,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
 
     const { prompt, sessionId, resume, workingDir, onMessage, onQuery, abortController,
             model, forkSession, resumeSessionAt, mcpServers, persistSession, canUseTool,
-            permissionMode: permModeOverride } = options;
+            permissionMode: permModeOverride, onWatchdogReset } = options;
 
     const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || '/tmp/disclaw'; // Final fallback — callers should resolve via working-dir.ts
     log(`Query started - session: ${sessionId || '(auto)'}, resume: ${resume}, model: ${model || '(default)'}, workingDir: ${cwd}`);
@@ -136,28 +147,81 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
 
     let resultSessionId: string | undefined;
     let messageCount = 0;
+    let stallDetected = false;
 
-    log(`SDK query iteration started`);
-    for await (const message of iterator) {
-        messageCount++;
-        if (controller.signal.aborted) {
-            log(`Abort signal detected after ${messageCount} messages, stopping iteration`);
-            break;
-        }
+    // --- Watchdog: detect stalled SDK queries ---
+    let lastMessageTime = Date.now();
+    const resetWatchdog = () => { lastMessageTime = Date.now(); };
+    if (onWatchdogReset) onWatchdogReset(resetWatchdog);
 
-        // Track session ID from any message that carries it
-        if ('session_id' in message && message.session_id) {
-            if (resultSessionId && resultSessionId !== message.session_id) {
-                log(`Session ID changed: ${resultSessionId} → ${message.session_id}`);
-            } else if (!resultSessionId) {
-                log(`Session ID assigned by SDK: ${message.session_id}`);
+    const watchdogInterval = setInterval(async () => {
+        const elapsed = Date.now() - lastMessageTime;
+        if (elapsed < STALL_TIMEOUT_MS) return;
+
+        stallDetected = true;
+        log.warn(`SDK stall detected after ${Math.round(elapsed / 1000)}s with no messages (${messageCount} total)`);
+
+        if (persistSession === false) {
+            // Ephemeral session (e.g. cron) — force kill immediately
+            log.warn(`Ephemeral session — force closing stalled query`);
+            iterator.close();
+        } else {
+            // Persistent session — try graceful interrupt first
+            log.warn(`Persistent session — attempting interrupt`);
+            try {
+                await iterator.interrupt();
+                // Wait grace period, then force close if still stuck
+                setTimeout(() => {
+                    if (stallDetected) {
+                        log.warn(`Interrupt grace period expired — force closing`);
+                        iterator.close();
+                    }
+                }, STALL_GRACE_MS);
+            } catch (err) {
+                log.error(`Interrupt failed during stall recovery: ${err} — force closing`);
+                iterator.close();
             }
-            resultSessionId = message.session_id;
         }
+    }, STALL_CHECK_INTERVAL_MS);
 
-        log.debug(`Message #${messageCount}: type=${message.type}${'subtype' in message ? `, subtype=${(message as any).subtype}` : ''}`);
+    try {
+        log(`SDK query iteration started`);
+        for await (const message of iterator) {
+            messageCount++;
+            lastMessageTime = Date.now();
 
-        await onMessage(message);
+            // If we get a message after interrupt, the stall resolved
+            if (stallDetected) {
+                log(`Stall resolved — received message after interrupt`);
+                stallDetected = false;
+            }
+
+            if (controller.signal.aborted) {
+                log(`Abort signal detected after ${messageCount} messages, stopping iteration`);
+                break;
+            }
+
+            // Track session ID from any message that carries it
+            if ('session_id' in message && message.session_id) {
+                if (resultSessionId && resultSessionId !== message.session_id) {
+                    log(`Session ID changed: ${resultSessionId} → ${message.session_id}`);
+                } else if (!resultSessionId) {
+                    log(`Session ID assigned by SDK: ${message.session_id}`);
+                }
+                resultSessionId = message.session_id;
+            }
+
+            log.debug(`Message #${messageCount}: type=${message.type}${'subtype' in message ? `, subtype=${(message as any).subtype}` : ''}`);
+
+            await onMessage(message);
+        }
+    } finally {
+        clearInterval(watchdogInterval);
+    }
+
+    // If the loop exited due to stall, throw so caller can handle recovery
+    if (stallDetected) {
+        throw new StallError(`SDK query stalled after ${messageCount} messages (no activity for ${STALL_TIMEOUT_MS / 1000}s)`);
     }
 
     const finalSessionId = resultSessionId || sessionId || '';

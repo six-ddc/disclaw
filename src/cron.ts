@@ -32,11 +32,16 @@ const log = createLogger('cron');
 
 const TIMEZONE = process.env.TZ;
 const MAX_FAILURES = 3;
+const EXECUTION_TIMEOUT_MS = 15 * 60 * 1000;  // 15 minutes
+const TIMEOUT_CHECK_INTERVAL_MS = 60 * 1000;  // check every 60s
 
 export class CronScheduler {
     private jobs = new Map<string, Cron>();
     private failures = new Map<string, number>();
     private client: Client;
+    /** Tracks when each executing job started (jobId → timestamp) */
+    private executionStarts = new Map<string, number>();
+    private timeoutChecker: ReturnType<typeof setInterval> | null = null;
 
     constructor(client: Client) {
         this.client = client;
@@ -78,6 +83,47 @@ export class CronScheduler {
                 this.execute(jobId);
             }
         }
+
+        // Start execution timeout checker
+        this.startTimeoutChecker();
+    }
+
+    /** Periodically check for cron jobs that have exceeded the execution timeout */
+    private startTimeoutChecker(): void {
+        if (this.timeoutChecker) return;
+        this.timeoutChecker = setInterval(() => {
+            const now = Date.now();
+            for (const [jobId, startTime] of this.executionStarts) {
+                const elapsed = now - startTime;
+                if (elapsed < EXECUTION_TIMEOUT_MS) continue;
+
+                log.warn(`Job ${jobId} exceeded execution timeout (${Math.round(elapsed / 1000)}s)`);
+                // Remove from tracking so onComplete knows it was timed out
+                this.executionStarts.delete(jobId);
+
+                const count = (this.failures.get(jobId) || 0) + 1;
+                this.failures.set(jobId, count);
+
+                const job = getCronJob(jobId);
+                if (!job) continue;
+
+                if (count >= MAX_FAILURES) {
+                    log.warn(`Auto-pausing job ${jobId} after ${MAX_FAILURES} consecutive failures (timeout)`);
+                    this.pause(jobId);
+                    updateCronControlPanel(jobId).catch(err => log.error(`Failed to update panel after timeout auto-pause for job ${jobId}: ${err}`));
+                    sendEmbed(job.thread_id, [{
+                        color: 0xff4444,
+                        title: 'Scheduled Task Auto-Paused',
+                        description: `Paused after ${MAX_FAILURES} consecutive failures.\nLast: execution timed out (>${Math.round(EXECUTION_TIMEOUT_MS / 60000)} min)`,
+                    }]).catch(err => log.error(`Failed to send timeout auto-pause embed for job ${jobId}: ${err}`));
+                } else {
+                    sendEmbed(job.thread_id, [{
+                        color: 0xffaa00,
+                        description: `\u26A0\uFE0F Execution timed out after ${Math.round(EXECUTION_TIMEOUT_MS / 60000)} min (failure ${count}/${MAX_FAILURES})`,
+                    }]).catch(err => log.error(`Failed to send timeout warning for job ${jobId}: ${err}`));
+                }
+            }
+        }, TIMEOUT_CHECK_INTERVAL_MS);
     }
 
     /** Register a croner instance for a job */
@@ -118,6 +164,9 @@ export class CronScheduler {
 
         log(`Executing job ${jobId} (thread=${job.thread_id}): ${job.prompt.slice(0, 80)}`);
 
+        // Track execution start for timeout detection
+        this.executionStarts.set(jobId, Date.now());
+
         // Record execution time
         setCronJobLastRun(jobId);
 
@@ -150,7 +199,16 @@ export class CronScheduler {
             workingDir,
             model: mapping?.model || undefined,
             onComplete: (error) => {
+                // Check if timeout checker already handled this job
+                const wasTimedOut = !this.executionStarts.has(jobId);
+                this.executionStarts.delete(jobId);
+
                 if (error) {
+                    if (wasTimedOut) {
+                        // Timeout checker already counted this failure — skip
+                        log.debug(`Job ${jobId} errored after timeout — already counted`);
+                        return;
+                    }
                     const count = (this.failures.get(jobId) || 0) + 1;
                     this.failures.set(jobId, count);
                     log.error(`Job ${jobId} failed (${count}/${MAX_FAILURES}): ${error.message}`);
@@ -166,9 +224,9 @@ export class CronScheduler {
                         }]).catch(err => log.error(`Failed to send auto-pause embed for job ${jobId}: ${err}`));
                     }
                 } else {
-                    // Reset failure count on success
+                    // Success — reset failure count (even if it was timed out but completed late)
                     this.failures.delete(jobId);
-                    log(`Job ${jobId} completed successfully`);
+                    log(`Job ${jobId} completed successfully${wasTimedOut ? ' (after timeout)' : ''}`);
                 }
             },
         });
@@ -298,12 +356,17 @@ export class CronScheduler {
 
     /** Stop all cron jobs */
     stopAll(): void {
+        if (this.timeoutChecker) {
+            clearInterval(this.timeoutChecker);
+            this.timeoutChecker = null;
+        }
         for (const [jobId, cron] of this.jobs) {
             cron.stop();
             log(`Stopped job ${jobId}`);
         }
         this.jobs.clear();
         this.failures.clear();
+        this.executionStarts.clear();
         log('All jobs stopped');
     }
 }

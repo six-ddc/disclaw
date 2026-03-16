@@ -5,7 +5,7 @@
  * JS single-threaded execution guarantees submit() atomicity.
  */
 
-import { queryClaudeSDK, generateTitle } from './claude-client.js';
+import { queryClaudeSDK, generateTitle, StallError } from './claude-client.js';
 import { createClaudeSender } from './discord-sender.js';
 import { convertToClaudeMessages } from './message-converter.js';
 import { sendToThread, editMessage, renameThread, truncateCodePoints, addReaction, removeReaction, sendTyping } from './discord.js';
@@ -199,6 +199,20 @@ class JobRunner {
 
         const canUseTool = createCanUseTool(job.threadId);
         let lastTypingTime = 0;
+        let watchdogResetFn: (() => void) | undefined;
+
+        // Wrap canUseTool to keep watchdog alive during user approval waits
+        const canUseToolWithWatchdog: typeof canUseTool = async (...args) => {
+            // Tick watchdog at start, then periodically while waiting
+            watchdogResetFn?.();
+            const keepAlive = setInterval(() => watchdogResetFn?.(), 30_000);
+            try {
+                return await canUseTool(...args);
+            } finally {
+                clearInterval(keepAlive);
+                watchdogResetFn?.();
+            }
+        };
 
         try {
             const resultSessionId = await queryClaudeSDK({
@@ -212,7 +226,8 @@ class JobRunner {
                 mcpServers: job.createMcpServers?.(),
                 persistSession: job.persistSession,
                 permissionMode: job.permissionMode,
-                canUseTool,
+                canUseTool: canUseToolWithWatchdog,
+                onWatchdogReset: (resetFn) => { watchdogResetFn = resetFn; },
                 onQuery: (q) => {
                     this.activeQueries.set(job.threadId, q);
                     log.debug(`Query object registered for thread=${job.threadId}`);
@@ -393,6 +408,36 @@ class JobRunner {
             const errStack = error instanceof Error ? error.stack : '';
             log.error(`Job failed for ${job.username} thread=${job.threadId} (attempt ${attempt}/${this.maxAttempts}): ${errMsg}`);
             if (errStack) log.error(`Stack trace for thread=${job.threadId}: ${errStack}`);
+
+            // StallError: special recovery path
+            if (error instanceof StallError) {
+                if (job.persistSession === false) {
+                    // Ephemeral (e.g. cron) — no retry, report error
+                    log.warn(`StallError on ephemeral session for thread=${job.threadId}, not retrying`);
+                    job.onComplete?.(error);
+                    for (const cb of job.batchedOnCompletes || []) cb(error);
+                    await sendToThread(job.threadId, `\u26A0\uFE0F Query stalled and was terminated.`).catch(() => {});
+                    return;
+                }
+                // Persistent session — auto-resume
+                log.warn(`StallError on persistent session for thread=${job.threadId}, auto-resuming`);
+                await sendToThread(job.threadId, `\u26A0\uFE0F Query stalled. Resuming...`).catch(() => {});
+                this.submit({
+                    prompt: 'continue',
+                    threadId: job.threadId,
+                    resume: true,
+                    userId: job.userId,
+                    username: job.username,
+                    workingDir: job.workingDir,
+                    model: job.model,
+                    permissionMode: job.permissionMode,
+                    createMcpServers: job.createMcpServers,
+                    persistSession: job.persistSession,
+                    onComplete: job.onComplete,
+                    batchedOnCompletes: job.batchedOnCompletes,
+                });
+                return;
+            }
 
             if (attempt < this.maxAttempts) {
                 const delay = this.backoffBaseMs * Math.pow(2, attempt - 1);
