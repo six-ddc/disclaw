@@ -19,7 +19,7 @@ import {
     type Interaction,
 } from 'discord.js';
 import { runner } from './runner.js';
-import { db, getThreadMapping } from './db.js';
+import { db, getThreadMapping, getCronJobByThread, cronJobDisplayName } from './db.js';
 import { truncateCodePoints, initDiscord, addReaction } from './discord.js';
 import {
     handleCd,
@@ -40,7 +40,7 @@ import { createDisclawMcpServer } from './mcp-server.js';
 import { handleCronInteraction } from './cron-buttons.js';
 import { handleUserInputInteraction } from './user-input.js';
 import { extractMessageContent } from './attachment-handler.js';
-import { buildPrompt } from './context-builder.js';
+import { buildPrompt, type CronJobContext } from './context-builder.js';
 import { createLogger } from './logger.js';
 import { parseWorkingDirFromMessage, resolveWorkingDirWithMapping } from './working-dir.js';
 
@@ -240,8 +240,24 @@ client.on(Events.MessageCreate, async (message: Message) => {
             const isForumThread = thread.parent?.type === ChannelType.GuildForum || thread.parent?.type === ChannelType.GuildMedia;
             const needsForumContext = isForumThread && !mapping.session_id;
 
-            log.debug(`Building prompt: thread=${thread.id} attachments=${message.attachments.size} forumContext=${needsForumContext}`);
-            const multimodalPrompt = await buildPrompt({ message, includeContext: needsForumContext ? 'forum' : false });
+            // For cron threads with empty session (new/cleared), include cron job metadata
+            let cronJobCtx: CronJobContext | undefined;
+            if (!mapping.session_id) {
+                const cronJob = getCronJobByThread(thread.id);
+                if (cronJob) {
+                    const nextRun = getCronScheduler().getNextRun(cronJob.job_id);
+                    cronJobCtx = {
+                        id: cronJob.job_id,
+                        name: cronJobDisplayName(cronJob),
+                        schedule: cronJob.schedule,
+                        lastRun: cronJob.last_run_at,
+                        nextRun: nextRun?.toISOString() ?? null,
+                    };
+                }
+            }
+
+            log.debug(`Building prompt: thread=${thread.id} attachments=${message.attachments.size} forumContext=${needsForumContext} cronContext=${!!cronJobCtx}`);
+            const multimodalPrompt = await buildPrompt({ message, includeContext: needsForumContext ? 'forum' : false, cronJob: cronJobCtx });
             const prompt = multimodalPrompt.type === 'text' ? multimodalPrompt.text : multimodalPrompt;
 
             // Use stored working dir or fall back to channel config / env / cwd

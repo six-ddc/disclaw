@@ -34,6 +34,7 @@ const TIMEZONE = process.env.TZ;
 const MAX_FAILURES = 3;
 const EXECUTION_TIMEOUT_MS = 15 * 60 * 1000;  // 15 minutes
 const TIMEOUT_CHECK_INTERVAL_MS = 60 * 1000;  // check every 60s
+const RETRY_DELAY_MS = 10 * 1000;  // 10s delay before retry
 
 export class CronScheduler {
     private jobs = new Map<string, Cron>();
@@ -222,6 +223,14 @@ export class CronScheduler {
                             title: 'Scheduled Task Auto-Paused',
                             description: `Paused after ${MAX_FAILURES} consecutive failures.\nLast error: ${truncateCodePoints(error.message, 200)}`,
                         }]).catch(err => log.error(`Failed to send auto-pause embed for job ${jobId}: ${err}`));
+                    } else {
+                        // Retry after delay
+                        log(`Job ${jobId} scheduling retry ${count}/${MAX_FAILURES} in ${RETRY_DELAY_MS / 1000}s`);
+                        sendEmbed(job.thread_id, [{
+                            color: 0xffaa00,
+                            description: `⚠️ Failed: ${truncateCodePoints(error.message, 100)}. Retrying (${count}/${MAX_FAILURES})…`,
+                        }]).catch(() => {});
+                        setTimeout(() => this.execute(jobId), RETRY_DELAY_MS);
                     }
                 } else {
                     // Success — reset failure count (even if it was timed out but completed late)

@@ -18,7 +18,7 @@ const log = createLogger('context');
 // --- XML utilities ---
 
 /** Escape special XML characters */
-function escapeXml(s: string): string {
+export function escapeXml(s: string): string {
     return s
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -228,6 +228,27 @@ async function formatUserMessage(message: Message, overrideText?: string): Promi
 
 // --- Entry point ---
 
+/** Cron job metadata for context injection */
+export interface CronJobContext {
+    id: string;
+    name: string;
+    schedule: string;
+    lastRun: string | null;
+    nextRun: string | null;
+}
+
+/** Build a <cronJob .../> XML element from cron job metadata */
+export function buildCronJobXml(cronJob: CronJobContext): string {
+    const attrs = [
+        `id="${escapeXml(cronJob.id)}"`,
+        `name="${escapeXml(cronJob.name)}"`,
+        `schedule="${escapeXml(cronJob.schedule)}"`,
+    ];
+    if (cronJob.lastRun) attrs.push(`lastRun="${escapeXml(cronJob.lastRun)}"`);
+    if (cronJob.nextRun) attrs.push(`nextRun="${escapeXml(cronJob.nextRun)}"`);
+    return `  <cronJob ${attrs.join(' ')} />`;
+}
+
 export interface BuildPromptOptions {
     message: Message;
     overrideText?: string;
@@ -238,6 +259,8 @@ export interface BuildPromptOptions {
      * - 'forum': channel info + forum post only, no history (cleared session in forum thread)
      */
     includeContext: boolean | 'full' | 'forum';
+    /** Cron job metadata to include in context (for new sessions in cron threads) */
+    cronJob?: CronJobContext;
 }
 
 /**
@@ -248,7 +271,7 @@ export interface BuildPromptOptions {
  * 3. Combine XML text with any binary content blocks into a MultimodalPrompt
  */
 export async function buildPrompt(options: BuildPromptOptions): Promise<MultimodalPrompt> {
-    const { message, overrideText, includeContext } = options;
+    const { message, overrideText, includeContext, cronJob } = options;
 
     // Normalize: true → 'full' for backwards compat
     const contextMode = includeContext === true ? 'full' : includeContext;
@@ -258,32 +281,42 @@ export async function buildPrompt(options: BuildPromptOptions): Promise<Multimod
 
     let fullXml: string;
 
-    if (contextMode && message.channel.isThread()) {
+    // Build context block if any context source is active
+    const needsContext = contextMode || cronJob;
+
+    if (needsContext && message.channel.isThread()) {
         const thread = message.channel;
 
         // Build context parts
         const contextParts: string[] = [];
 
-        // Channel info
-        const channelInfo = buildChannelInfoXml(thread);
-        if (channelInfo) contextParts.push(channelInfo);
+        // Channel info (only when forum/full context requested)
+        if (contextMode) {
+            const channelInfo = buildChannelInfoXml(thread);
+            if (channelInfo) contextParts.push(channelInfo);
 
-        // Forum post title + body
-        const forum = await fetchForumContext(thread);
-        if (forum) {
-            const title = escapeXml(forum.title);
-            const body = forum.body ? escapeXml(forum.body) : '';
-            if (body) {
-                contextParts.push(`  <forumPost title="${title}">\n${body}\n  </forumPost>`);
-            } else {
-                contextParts.push(`  <forumPost title="${title}" />`);
+            // Forum post title + body
+            const forum = await fetchForumContext(thread);
+            if (forum) {
+                const title = escapeXml(forum.title);
+                const body = forum.body ? escapeXml(forum.body) : '';
+                if (body) {
+                    contextParts.push(`  <forumPost title="${title}">\n${body}\n  </forumPost>`);
+                } else {
+                    contextParts.push(`  <forumPost title="${title}" />`);
+                }
+            }
+
+            // Thread history (only in 'full' mode)
+            if (contextMode === 'full') {
+                const history = await fetchThreadHistory(thread, message.id);
+                if (history) contextParts.push(history);
             }
         }
 
-        // Thread history (only in 'full' mode)
-        if (contextMode === 'full') {
-            const history = await fetchThreadHistory(thread, message.id);
-            if (history) contextParts.push(history);
+        // Cron job metadata
+        if (cronJob) {
+            contextParts.push(buildCronJobXml(cronJob));
         }
 
         if (contextParts.length > 0) {

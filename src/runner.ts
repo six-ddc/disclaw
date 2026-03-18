@@ -412,11 +412,10 @@ class JobRunner {
             // StallError: special recovery path
             if (error instanceof StallError) {
                 if (job.persistSession === false) {
-                    // Ephemeral (e.g. cron) — no retry, report error
-                    log.warn(`StallError on ephemeral session for thread=${job.threadId}, not retrying`);
+                    // Ephemeral (e.g. cron) — delegate error handling to caller
+                    log.warn(`StallError on ephemeral session for thread=${job.threadId}, delegating to caller`);
                     job.onComplete?.(error);
                     for (const cb of job.batchedOnCompletes || []) cb(error);
-                    await sendToThread(job.threadId, `\u26A0\uFE0F Query stalled and was terminated.`).catch(() => {});
                     return;
                 }
                 // Persistent session — auto-resume
