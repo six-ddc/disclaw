@@ -217,6 +217,27 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
     const pages: PagerPage[] = [];
     const toolUseIdToPage = new Map<string, number>();
 
+    // Find the last assistant text block index so we can skip it
+    // (it's already sent as a standalone Discord message via result)
+    let lastAssistantTextIdx = -1;
+    let blockCounter = 0;
+    for (const raw of rawMessages) {
+        const msg = raw.message as Record<string, unknown>;
+        const content = msg.content;
+        if (typeof content === 'string' || !Array.isArray(content)) {
+            // Still need to count blocks for user messages to keep index consistent
+            continue;
+        }
+        for (const block of content) {
+            if (!block || typeof block !== 'object') { blockCounter++; continue; }
+            if (block.type === 'text' && block.text && raw.type === 'assistant') {
+                lastAssistantTextIdx = blockCounter;
+            }
+            blockCounter++;
+        }
+    }
+
+    blockCounter = 0;
     for (const raw of rawMessages) {
         const msg = raw.message as Record<string, unknown>;
         const content = msg.content;
@@ -226,7 +247,7 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
         if (!Array.isArray(content)) continue;
 
         for (const block of content) {
-            if (!block || typeof block !== 'object') continue;
+            if (!block || typeof block !== 'object') { blockCounter++; continue; }
 
             if (block.type === 'thinking' && block.thinking) {
                 pages.push({
@@ -236,7 +257,15 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
                     status: 'done',
                 });
             } else if (block.type === 'text' && block.text && raw.type === 'assistant') {
-                // Text is sent as separate Discord messages on result, skip in pager
+                // Skip the last assistant text — it's already sent as a standalone Discord message
+                if (blockCounter !== lastAssistantTextIdx) {
+                    pages.push({
+                        kind: 'text',
+                        label: 'Assistant',
+                        content: truncatePreview(String(block.text), 20, 3500),
+                        status: 'done',
+                    });
+                }
             } else if (block.type === 'tool_use') {
                 const toolName = block.name || 'Unknown';
                 const toolInput = (block.input || {}) as Record<string, unknown>;
@@ -268,6 +297,7 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
                     }
                 }
             }
+            blockCounter++;
         }
     }
 
@@ -406,6 +436,18 @@ export function createToolPager(threadId: string): ToolPager {
                     });
                     state.currentPage = state.pages.length - 1;
                     log.debug(`[${id}] +thinking page=${state.currentPage}`);
+                    scheduleUpdate(state);
+                    break;
+                }
+                case 'text': {
+                    state.pages.push({
+                        kind: 'text',
+                        label: 'Assistant',
+                        content: truncatePreview(msg.content, 20, 3500),
+                        status: 'done',
+                    });
+                    state.currentPage = state.pages.length - 1;
+                    log.debug(`[${id}] +text page=${state.currentPage}`);
                     scheduleUpdate(state);
                     break;
                 }

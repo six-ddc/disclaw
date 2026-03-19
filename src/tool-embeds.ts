@@ -114,15 +114,20 @@ function buildSpecializedFields(
         const filePath = input.file_path as string | undefined;
         const oldStr = input.old_string as string | undefined;
         const newStr = input.new_string as string | undefined;
-        const lang = filePath ? getLangTag(filePath) : '';
         if (filePath) fields.push({ name: '📁 File', value: `\`${filePath}\``, inline: false });
-        if (oldStr) {
-            const { preview } = truncateContent(oldStr, 3, 150);
-            fields.push({ name: '🔴 Replacing', value: `\`\`\`${lang}\n${escapeCodeBlock(preview)}\n\`\`\``, inline: false });
-        }
-        if (newStr) {
-            const { preview } = truncateContent(newStr, 3, 150);
-            fields.push({ name: '🟢 With', value: `\`\`\`${lang}\n${escapeCodeBlock(preview)}\n\`\`\``, inline: false });
+        // Render as unified diff: - lines (red) and + lines (green) via ```diff
+        const oldLines = oldStr ? truncateContent(oldStr, 4, 200).preview.split('\n') : [];
+        const newLines = newStr ? truncateContent(newStr, 4, 200).preview.split('\n') : [];
+        if (oldLines.length > 0 || newLines.length > 0) {
+            const maxLineNum = Math.max(oldLines.length, newLines.length);
+            const pad = String(maxLineNum).length;
+            const header = `@@ -${oldLines.length} +${newLines.length} @@`;
+            const diffLines = [
+                header,
+                ...oldLines.map((l, i) => `- ${String(i + 1).padStart(pad)} │ ${l}`),
+                ...newLines.map((l, i) => `+ ${String(i + 1).padStart(pad)} │ ${l}`),
+            ];
+            fields.push({ name: 'Diff', value: `\`\`\`diff\n${escapeCodeBlock(diffLines.join('\n'))}\n\`\`\``, inline: false });
         }
         return { fields };
     }
@@ -270,7 +275,9 @@ export function buildToolResultField(resultContent: string): { field: EmbedField
         };
     }
 
-    const { preview, isTruncated, totalLines } = truncateContent(resultContent);
+    // Clean up Read tool line number format: "     14→content" → "14│content"
+    const cleaned = resultContent.replace(/^\s*(\d+)→/gm, '$1│');
+    const { preview, isTruncated, totalLines } = truncateContent(cleaned);
     const suffix = isTruncated ? ` (+${totalLines - 15} more lines)` : '';
     return {
         field: {

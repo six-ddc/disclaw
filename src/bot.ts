@@ -12,6 +12,7 @@ import {
     Events,
     Message,
     MessageFlags,
+    MessageType,
     Partials,
     TextChannel,
     ThreadAutoArchiveDuration,
@@ -216,8 +217,9 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 });
 
 client.on(Events.MessageCreate, async (message: Message) => {
-    // Ignore bots
+    // Ignore bots and system messages (e.g. "X changed the channel name")
     if (message.author.bot) return;
+    if (message.type !== MessageType.Default && message.type !== MessageType.Reply) return;
 
     const isMentioned = client.user && message.mentions.has(client.user);
     const isInThread = message.channel.isThread();
