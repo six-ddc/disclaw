@@ -77,6 +77,23 @@ export function truncateCodePoints(text: string, max: number, suffix = '...'): s
 }
 
 /**
+ * Convert headings with 4+ `#` to bold text.
+ * Discord only renders h1–h3, so `#### Foo` becomes `**Foo**`.
+ * Skips lines inside code blocks.
+ */
+export function demoteHeadings(text: string): string {
+    const lines = text.split('\n');
+    let inCodeBlock = false;
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i]!.trimStart().startsWith('```')) inCodeBlock = !inCodeBlock;
+        if (!inCodeBlock) {
+            lines[i] = lines[i]!.replace(/^(#{4,})\s+(.+)$/, '**$2**');
+        }
+    }
+    return lines.join('\n');
+}
+
+/**
  * Convert markdown tables to card-style key-value format.
  * Discord has no table rendering, so each data row becomes a card
  * with **Header**: value pairs, separated by horizontal lines.
@@ -157,8 +174,8 @@ export function flattenTables(text: string): string {
 }
 
 export function splitMarkdown(text: string, maxLen = 2000): string[] {
-    // Flatten tables before splitting since Discord doesn't render them
-    text = flattenTables(text);
+    // Normalize markdown for Discord (tables → cards, deep headings → bold)
+    text = flattenTables(demoteHeadings(text));
     if (text.length <= maxLen) {
         log.debug(`Markdown fits in single chunk (${text.length} chars), no split needed`);
         return [text];
@@ -432,7 +449,7 @@ export async function editMessage(channelId: string, messageId: string, content:
         log.debug(`Skipping empty edit for message ${messageId} in ${channelId}`);
         return;
     }
-    let processed = flattenTables(content);
+    let processed = flattenTables(demoteHeadings(content));
     if (suppressLinkPreviews) processed = wrapUrls(processed);
     if (processed.length > 2000) {
         processed = truncateCodePoints(processed, 2000);

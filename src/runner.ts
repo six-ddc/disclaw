@@ -248,9 +248,13 @@ class JobRunner {
                             sendTyping(job.threadId);
                         }
 
-                        // Capture the final result text for status message update
-                    if (sdkMessage.type === 'result' && sdkMessage.subtype === 'success') {
-                        lastResultText = sdkMessage.result;
+                    // Capture result text and send as separate message(s)
+                    if (sdkMessage.type === 'result') {
+                        const resultText = (sdkMessage as Record<string, unknown>).result as string | undefined;
+                        if (resultText) {
+                            lastResultText = resultText;
+                            if (pager) await sendToThread(job.threadId, resultText);
+                        }
                     }
 
                     // Detect new/changed session from SDK init message
@@ -372,13 +376,10 @@ class JobRunner {
                 });
             }
 
-            // Generate title on first completion (async, non-blocking)
+            // Generate title on first completion or after title_generate tool clears it
             if (!getThreadTitle(job.threadId) && lastResultText) {
                 log.debug(`Triggering title generation for thread=${job.threadId}`);
-                const promptText = typeof job.prompt === 'string'
-                    ? job.prompt
-                    : job.prompt.type === 'text' ? job.prompt.text : job.prompt.textSummary;
-                this.generateAndSetTitle(job.threadId, promptText, lastResultText);
+                this.generateAndSetTitle(job.threadId, resultSessionId, job.workingDir);
             }
 
             log(`Job completed for ${job.username} thread=${job.threadId}, resultSessionId=${resultSessionId}`);
@@ -424,6 +425,7 @@ class JobRunner {
                 this.submit({
                     prompt: 'continue',
                     threadId: job.threadId,
+                    sessionId: job.sessionId,
                     resume: true,
                     userId: job.userId,
                     username: job.username,
@@ -484,13 +486,10 @@ class JobRunner {
     }
 
     /** Generate a title via AI and update both DB and Discord thread name. */
-    private async generateAndSetTitle(threadId: string, prompt: string, reply: string): Promise<void> {
+    private async generateAndSetTitle(threadId: string, sessionId: string, workingDir?: string): Promise<void> {
         try {
-            log.debug(`Generating title for thread=${threadId}`);
-            const title = await generateTitle([
-                { role: 'user', text: prompt },
-                { role: 'assistant', text: reply },
-            ]);
+            log.debug(`Generating title for thread=${threadId} session=${sessionId}`);
+            const title = await generateTitle(sessionId, workingDir);
             if (!title) {
                 log.warn(`Empty title generated for thread=${threadId}`);
                 return;

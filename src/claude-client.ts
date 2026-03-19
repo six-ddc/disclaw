@@ -20,7 +20,7 @@ export class StallError extends Error {
     override name = 'StallError';
 }
 
-const STALL_TIMEOUT_MS = 2 * 60 * 1000;  // 2 minutes
+const STALL_TIMEOUT_MS = 5 * 60 * 1000;  // 5 minutes
 const STALL_CHECK_INTERVAL_MS = 30 * 1000;  // check every 30s
 const STALL_GRACE_MS = 10 * 1000;  // grace period after interrupt before force close
 
@@ -148,6 +148,8 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
     let resultSessionId: string | undefined;
     let messageCount = 0;
     let stallDetected = false;
+    let interruptedByStall = false;  // stays true once stall triggers interrupt
+    let lastResultSuccess = false;
 
     // --- Watchdog: detect stalled SDK queries ---
     let lastMessageTime = Date.now();
@@ -159,6 +161,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
         if (elapsed < STALL_TIMEOUT_MS) return;
 
         stallDetected = true;
+        interruptedByStall = true;
         log.warn(`SDK stall detected after ${Math.round(elapsed / 1000)}s with no messages (${messageCount} total)`);
 
         if (persistSession === false) {
@@ -213,14 +216,19 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
 
             log.debug(`Message #${messageCount}: type=${message.type}${'subtype' in message ? `, subtype=${(message as any).subtype}` : ''}`);
 
+            // Track successful completion for stall recovery decision
+            if (message.type === 'result' && 'subtype' in message && (message as any).subtype === 'success') {
+                lastResultSuccess = true;
+            }
+
             await onMessage(message);
         }
     } finally {
         clearInterval(watchdogInterval);
     }
 
-    // If the loop exited due to stall, throw so caller can handle recovery
-    if (stallDetected) {
+    // Once a stall triggered interrupt, always throw unless it completed successfully
+    if (stallDetected || (interruptedByStall && !lastResultSuccess)) {
         throw new StallError(`SDK query stalled after ${messageCount} messages (no activity for ${STALL_TIMEOUT_MS / 1000}s)`);
     }
 
@@ -234,16 +242,34 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
  * Generate a short emoji-prefixed title from conversation context.
  * Accepts an array of {role, text} turns. Uses query() with persistSession: false.
  */
-export async function generateTitle(context: Array<{ role: string; text: string }>): Promise<string> {
-    log(`Title generation started - ${context.length} conversation turns`);
-    // Build conversation snippet, truncated to ~2000 chars total
+export async function generateTitle(sessionId: string, workingDir?: string): Promise<string> {
+    log(`Title generation started - session=${sessionId}`);
+
+    // Fetch full conversation from SDK session
+    const { getSessionMessages } = await import('@anthropic-ai/claude-agent-sdk');
+    const rawMessages = await getSessionMessages(sessionId, { dir: workingDir });
+    const typedMessages = rawMessages as Array<{ type: string; message: { role?: string; content?: unknown } }>;
+
+    // Extract user/assistant text turns, truncated to ~2000 chars total
     let totalLen = 0;
     const lines: string[] = [];
-    for (const turn of context) {
-        const label = turn.role === 'user' ? 'User' : 'Assistant';
-        const line = `${label}: ${turn.text}`;
+    for (const msg of typedMessages) {
+        if (msg.type !== 'user' && msg.type !== 'assistant') continue;
+        const content = msg.message?.content;
+        let text = '';
+        if (typeof content === 'string') {
+            text = content;
+        } else if (Array.isArray(content)) {
+            text = (content as Array<{ type?: string; text?: string }>)
+                .filter(b => b.type === 'text')
+                .map(b => b.text || '')
+                .join('');
+        }
+        if (!text.trim()) continue;
+        const label = msg.type === 'user' ? 'User' : 'Assistant';
+        const line = `${label}: ${text}`;
         if (totalLen + line.length > 2000) {
-            lines.push(`${label}: ${turn.text.slice(0, 2000 - totalLen)}`);
+            lines.push(`${label}: ${text.slice(0, 2000 - totalLen)}`);
             break;
         }
         lines.push(line);

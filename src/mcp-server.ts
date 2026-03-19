@@ -286,10 +286,10 @@ export function createDisclawMcpServer(
 
     const titleGenerateTool = tool(
         'title_generate',
-        'Regenerate or update the title of the current Discord thread. Clears the current title so it will be regenerated when this query completes. Use when the user asks to update, regenerate, or change the thread title.',
-        {},
-        async () => {
-            log.debug(`MCP title_generate invoked (sourceThreadId=${sourceThreadId || 'none'})`);
+        'Set the title of the current Discord thread. Generate a short title (max 8 words) based on the current conversation context. The title MUST start with a single emoji that best represents the topic. Use when the user asks to update, regenerate, or change the thread title.',
+        { title: z.string().describe('The generated title (max 8 words, must start with an emoji)') },
+        async (args) => {
+            log.debug(`MCP title_generate invoked (sourceThreadId=${sourceThreadId || 'none'}, title="${args.title}")`);
             if (!sourceThreadId) {
                 log.warn('MCP title_generate: no thread context available');
                 return {
@@ -298,12 +298,13 @@ export function createDisclawMcpServer(
                 };
             }
 
-            // Clear the title — runner will regenerate it after this query completes
-            setThreadTitle(sourceThreadId, '');
-            log(`Title cleared for thread ${sourceThreadId}, will regenerate on query completion`);
+            const title = truncateCodePoints(args.title.trim(), 100);
+            setThreadTitle(sourceThreadId, title);
+            await renameThread(sourceThreadId, title);
+            log(`Title set via MCP tool for thread ${sourceThreadId}: "${title}"`);
 
             return {
-                content: [{ type: 'text' as const, text: 'Title will be regenerated when this response completes.' }],
+                content: [{ type: 'text' as const, text: `Title updated: ${title}` }],
             };
         },
     );

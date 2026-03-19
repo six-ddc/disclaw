@@ -236,18 +236,7 @@ function parseSessionPages(rawMessages: Array<{ type: string; message: unknown }
                     status: 'done',
                 });
             } else if (block.type === 'text' && block.text && raw.type === 'assistant') {
-                const text = String(block.text).trim();
-                if (text) {
-                    const chunks = splitMarkdown(text, 3800);
-                    for (const chunk of chunks) {
-                        pages.push({
-                            kind: 'text',
-                            label: 'Assistant',
-                            content: chunk,
-                            status: 'done',
-                        });
-                    }
-                }
+                // Text is sent as separate Discord messages on result, skip in pager
             } else if (block.type === 'tool_use') {
                 const toolName = block.name || 'Unknown';
                 const toolInput = (block.input || {}) as Record<string, unknown>;
@@ -418,24 +407,6 @@ export function createToolPager(threadId: string): ToolPager {
                     state.currentPage = state.pages.length - 1;
                     log.debug(`[${id}] +thinking page=${state.currentPage}`);
                     scheduleUpdate(state);
-                    break;
-                }
-                case 'text': {
-                    const text = msg.content.trim();
-                    if (text) {
-                        const chunks = splitMarkdown(text, 3800);
-                        for (const chunk of chunks) {
-                            state.pages.push({
-                                kind: 'text',
-                                label: 'Assistant',
-                                content: chunk,
-                                status: 'done',
-                            });
-                        }
-                        state.currentPage = state.pages.length - 1;
-                        log.debug(`[${id}] +text page=${state.currentPage}`);
-                        scheduleUpdate(state);
-                    }
                     break;
                 }
                 case 'tool_progress':
