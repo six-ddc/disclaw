@@ -78,7 +78,20 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
 
     const controller = abortController || new AbortController();
 
-    const systemPromptAppend = 'You are running inside a Discord bot. When you generate or encounter files that the user wants (images, audio, video, documents), use MCP tools (discord_send_image / discord_send_media / discord_send_file) to send them — they auto-target the current thread, no channel or thread ID needed. Send files proactively after generating them. Use cron_create / cron_list / cron_update / cron_delete / cron_run_now for scheduled task management. Use title_generate to update the current thread title when the user asks to rename, regenerate, or change it.';
+    const systemPromptAppend = `You are running inside a Discord bot.
+
+Discord tools: discord_send (messages/embeds/files/replies), discord_edit (update bot messages), discord_get/discord_list (read messages), discord_react/discord_unreact (emoji reactions), discord_delete (remove messages), discord_create_thread (new threads), discord_set_title (rename thread, omit title to auto-generate), discord_channels (list server channels), discord_threads (list threads in a channel). All default to the current thread — no ID needed. Send files proactively after generating them.
+
+Cron tools: cron_create / cron_list / cron_update / cron_delete / cron_run_now for scheduled task management.
+
+Discord formatting — use these to create clickable references:
+- Channel/thread link: <#channel_id> (e.g. <#123456> renders as #general)
+- User mention: <@user_id>
+- Role mention: <@&role_id>
+- Timestamp: <t:unix_epoch:format> where format is t(short time), T(long time), d(short date), D(long date), f(short datetime), F(long datetime), R(relative, e.g. "2 hours ago")
+- Message link: https://discord.com/channels/guild_id/channel_id/message_id (renders as a preview card)
+- Hyperlink in embeds: [text](url)
+Prefer these over plain IDs whenever referencing channels, users, or times in your messages.`;
     log.debug(`System prompt append: "${systemPromptAppend}"`);
 
     const disallowedTools: string[] = ['CronCreate', 'CronList', 'CronDelete'];

@@ -282,7 +282,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
                 sourceMessageId: message.id,
                 eyesReaction: { channelId: thread.id, messageId: message.id },
                 createMcpServers: parentId
-                    ? () => ({ 'disclaw': createDisclawMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id) })
+                    ? (getSessionId) => ({ 'disclaw': createDisclawMcpServer(parentId, message.author.id, workingDir, mapping.model || undefined, thread.id, getSessionId) })
                     : undefined,
             });
 
@@ -380,7 +380,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         parentChannelId: channelId,
         statusMessageId,
         eyesReaction: { channelId: message.channelId, messageId: message.id },
-        createMcpServers: () => ({ 'disclaw': createDisclawMcpServer(channelId, message.author.id, workingDir, undefined, thread.id) }),
+        createMcpServers: (getSessionId) => ({ 'disclaw': createDisclawMcpServer(channelId, message.author.id, workingDir, undefined, thread.id, getSessionId) }),
     });
 });
 

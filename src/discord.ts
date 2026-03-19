@@ -11,7 +11,7 @@ import { createWriteStream } from 'fs';
 import { unlink } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, Routes } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, MessageFlags, Routes } from 'discord.js';
 import type { Client, TextChannel } from 'discord.js';
 import { createLogger } from './logger.js';
 
@@ -393,6 +393,7 @@ export function buildPaginationRow(
 export interface EmbedData {
     color?: number;
     title?: string;
+    url?: string;
     description?: string;
     fields?: Array<{ name: string; value: string; inline?: boolean }>;
     footer?: { text: string };
@@ -502,6 +503,13 @@ export async function editRichMessage(channelId: string, messageId: string, payl
  * Add a reaction emoji to a message
  */
 export async function deleteMessage(channelId: string, messageId: string): Promise<void> {
+    const channel = await getChannel(channelId);
+    await channel.messages.delete(messageId);
+    log.debug(`Message deleted (channelId=${channelId}, messageId=${messageId})`);
+}
+
+/** Delete a message, silently ignoring errors. For internal use (e.g. cleanup). */
+export async function deleteMessageSilent(channelId: string, messageId: string): Promise<void> {
     try {
         const channel = await getChannel(channelId);
         await channel.messages.delete(messageId);
@@ -661,4 +669,269 @@ export async function removeReaction(channelId: string, messageId: string, emoji
     }
     await client.rest.delete(Routes.channelMessageOwnReaction(channelId, messageId, encodeURIComponent(emoji)));
     log.debug(`Reaction removed (channelId=${channelId}, messageId=${messageId}, emoji=${emoji})`);
+}
+
+// =========================================================================
+// Serialized message types for MCP tools
+// =========================================================================
+
+export interface SerializedMessage {
+    id: string;
+    author: { id: string; username: string; display_name: string | null; bot: boolean };
+    content: string;
+    embeds: Array<{ title?: string; description?: string; color?: number; url?: string;
+        image_url?: string; thumbnail_url?: string; footer?: string;
+        fields?: Array<{ name: string; value: string; inline?: boolean }> }>;
+    attachments: Array<{ id: string; filename: string; url: string; size: number; content_type?: string }>;
+    timestamp: string;
+    edited_timestamp: string | null;
+    pinned: boolean;
+    reactions: Array<{ emoji: string; count: number }>;
+    reply_to: string | null;
+    thread: string | null;
+}
+
+export interface SerializedMessageSummary {
+    id: string;
+    author: string;
+    bot: boolean;
+    content: string;      // truncated 200 chars
+    attachments: number;
+    embeds: number;
+    timestamp: string;
+    edited: boolean;
+    pinned: boolean;
+    reply_to: string | null;
+    thread: string | null;
+}
+
+/** Fetch a single message and serialize it for MCP tool output. */
+export async function fetchMessage(channelId: string, messageId: string): Promise<SerializedMessage> {
+    const channel = await getChannel(channelId);
+    const msg = await channel.messages.fetch(messageId);
+    return {
+        id: msg.id,
+        author: {
+            id: msg.author.id,
+            username: msg.author.username,
+            display_name: msg.author.displayName ?? null,
+            bot: msg.author.bot,
+        },
+        content: msg.content,
+        embeds: msg.embeds.map(e => ({
+            ...(e.title ? { title: e.title } : {}),
+            ...(e.description ? { description: e.description } : {}),
+            ...(e.color != null ? { color: e.color } : {}),
+            ...(e.url ? { url: e.url } : {}),
+            ...(e.image ? { image_url: e.image.url } : {}),
+            ...(e.thumbnail ? { thumbnail_url: e.thumbnail.url } : {}),
+            ...(e.footer ? { footer: e.footer.text } : {}),
+            ...(e.fields.length > 0 ? { fields: e.fields.map(f => ({ name: f.name, value: f.value, ...(f.inline ? { inline: true } : {}) })) } : {}),
+        })),
+        attachments: [...msg.attachments.values()].map(a => ({
+            id: a.id,
+            filename: a.name,
+            url: a.url,
+            size: a.size,
+            ...(a.contentType ? { content_type: a.contentType } : {}),
+        })),
+        timestamp: msg.createdAt.toISOString(),
+        edited_timestamp: msg.editedAt?.toISOString() ?? null,
+        pinned: msg.pinned,
+        reactions: [...msg.reactions.cache.values()].map(r => ({
+            emoji: r.emoji.toString(),
+            count: r.count,
+        })),
+        reply_to: msg.reference?.messageId ?? null,
+        thread: msg.thread?.id ?? null,
+    };
+}
+
+/** Fetch multiple messages and serialize as summaries. Returns sorted ascending by timestamp. */
+export async function fetchMessages(channelId: string, options: { limit?: number; before?: string; after?: string; around?: string }): Promise<SerializedMessageSummary[]> {
+    const channel = await getChannel(channelId);
+    const msgs = await channel.messages.fetch({
+        limit: options.limit ?? 25,
+        ...(options.before ? { before: options.before } : {}),
+        ...(options.after ? { after: options.after } : {}),
+        ...(options.around ? { around: options.around } : {}),
+    });
+    const summaries: SerializedMessageSummary[] = [...msgs.values()].map(msg => ({
+        id: msg.id,
+        author: msg.author.username,
+        bot: msg.author.bot,
+        content: msg.content.length > 200 ? msg.content.slice(0, 200) + '...' : msg.content,
+        attachments: msg.attachments.size,
+        embeds: msg.embeds.length,
+        timestamp: msg.createdAt.toISOString(),
+        edited: msg.editedAt !== null,
+        pinned: msg.pinned,
+        reply_to: msg.reference?.messageId ?? null,
+        thread: msg.thread?.id ?? null,
+    }));
+    // Sort ascending by timestamp (discord.js returns newest-first)
+    summaries.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    return summaries;
+}
+
+/** Create a thread in a channel. Returns thread ID, name, and optional initial message ID. */
+export async function createThread(channelId: string, options: {
+    name: string;
+    messageId?: string;
+    autoArchiveDuration?: number;
+    message?: string;
+}): Promise<{ threadId: string; name: string; messageId?: string }> {
+    const channel = await getChannel(channelId);
+    let thread;
+    if (options.messageId) {
+        const msg = await channel.messages.fetch(options.messageId);
+        thread = await msg.startThread({
+            name: options.name,
+            autoArchiveDuration: (options.autoArchiveDuration ?? 1440) as 60 | 1440 | 4320 | 10080,
+        });
+    } else {
+        thread = await channel.threads.create({
+            name: options.name,
+            type: ChannelType.PublicThread,
+            autoArchiveDuration: (options.autoArchiveDuration ?? 1440) as 60 | 1440 | 4320 | 10080,
+        });
+    }
+    let messageId: string | undefined;
+    if (options.message) {
+        const sent = await thread.send(options.message);
+        messageId = sent.id;
+    }
+    log(`Thread created: threadId=${thread.id} name=${options.name} channelId=${channelId}`);
+    return { threadId: thread.id, name: thread.name, messageId };
+}
+
+/** Channel type label mapping */
+const CHANNEL_TYPE_LABELS: Record<number, string> = {
+    [ChannelType.GuildText]: 'text',
+    [ChannelType.GuildVoice]: 'voice',
+    [ChannelType.GuildCategory]: 'category',
+    [ChannelType.GuildAnnouncement]: 'announcement',
+    [ChannelType.GuildStageVoice]: 'stage',
+    [ChannelType.GuildForum]: 'forum',
+    [ChannelType.GuildMedia]: 'media',
+};
+
+export interface ChannelInfo {
+    id: string;
+    name: string;
+    type: string;
+    topic?: string;
+    children?: ChannelInfo[];
+}
+
+/** Fetch all channels in the guild that contains the given channel, returned as a tree. */
+export async function fetchChannelTree(channelId: string): Promise<ChannelInfo[]> {
+    if (!client) throw new Error('Discord client not initialized');
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || !('guild' in channel) || !channel.guild) {
+        throw new Error(`Cannot resolve guild from channel ${channelId}`);
+    }
+    const guild = channel.guild;
+    const channels = await guild.channels.fetch();
+
+    // Collect raw channel info with internal fields for tree building
+    const raw: Array<{ id: string; name: string; type: string; parentId: string | null; position: number; topic?: string }> = [];
+    for (const [, ch] of channels) {
+        if (!ch) continue;
+        raw.push({
+            id: ch.id,
+            name: ch.name,
+            type: CHANNEL_TYPE_LABELS[ch.type] || `unknown(${ch.type})`,
+            parentId: ch.parentId,
+            position: ch.position,
+            ...('topic' in ch && ch.topic ? { topic: ch.topic } : {}),
+        });
+    }
+
+    const toInfo = (r: typeof raw[number]): ChannelInfo => ({
+        id: r.id, name: r.name, type: r.type,
+        ...(r.topic ? { topic: r.topic } : {}),
+    });
+
+    // Build tree: nest children under categories
+    const categories = raw.filter(c => c.type === 'category');
+    const childMap = new Map<string, typeof raw>();
+    const topLevel = raw.filter(c => c.type !== 'category' && !c.parentId);
+
+    for (const ch of raw) {
+        if (ch.type === 'category' || !ch.parentId) continue;
+        let arr = childMap.get(ch.parentId);
+        if (!arr) { arr = []; childMap.set(ch.parentId, arr); }
+        arr.push(ch);
+    }
+
+    const byPos = (a: { position: number }, b: { position: number }) => a.position - b.position;
+    topLevel.sort(byPos);
+    categories.sort(byPos);
+
+    const result: ChannelInfo[] = topLevel.map(toInfo);
+    for (const cat of categories) {
+        const children = (childMap.get(cat.id) || []).sort(byPos).map(toInfo);
+        result.push({ ...toInfo(cat), children });
+    }
+
+    return result;
+}
+
+export interface ThreadInfo {
+    id: string;
+    name: string;
+    archived: boolean;
+    locked: boolean;
+    message_count: number;
+    created_at: string | null;
+    archive_at: string | null;
+}
+
+/** Fetch active and optionally archived threads for a channel. */
+export async function fetchThreads(channelId: string, options?: { archived?: boolean }): Promise<ThreadInfo[]> {
+    if (!client) throw new Error('Discord client not initialized');
+    const channel = await client.channels.fetch(channelId);
+    if (!channel || !('threads' in channel)) {
+        throw new Error(`Channel ${channelId} does not support threads`);
+    }
+    const threadManager = (channel as import('discord.js').TextChannel).threads;
+
+    const results: ThreadInfo[] = [];
+
+    // Active threads
+    const active = await threadManager.fetchActive();
+    for (const [, t] of active.threads) {
+        results.push({
+            id: t.id,
+            name: t.name,
+            archived: false,
+            locked: t.locked ?? false,
+            message_count: t.messageCount ?? 0,
+            created_at: t.createdAt?.toISOString() ?? null,
+            archive_at: t.archiveTimestamp ? new Date(t.archiveTimestamp).toISOString() : null,
+        });
+    }
+
+    // Archived threads (optional, fetches recent 25)
+    if (options?.archived) {
+        try {
+            const archived = await threadManager.fetchArchived({ limit: 25 });
+            for (const [, t] of archived.threads) {
+                results.push({
+                    id: t.id,
+                    name: t.name,
+                    archived: true,
+                    locked: t.locked ?? false,
+                    message_count: t.messageCount ?? 0,
+                    created_at: t.createdAt?.toISOString() ?? null,
+                    archive_at: t.archiveTimestamp ? new Date(t.archiveTimestamp).toISOString() : null,
+                });
+            }
+        } catch {
+            // Some channel types may not support fetchArchived
+        }
+    }
+
+    return results;
 }

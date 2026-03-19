@@ -37,7 +37,7 @@ export interface ClaudeJob {
     forkSession?: boolean;
     resumeSessionAt?: string;
     /** Factory that creates fresh MCP servers for each query() call (instances are single-use) */
-    createMcpServers?: () => Record<string, McpServerConfig>;
+    createMcpServers?: (getSessionId: () => string | undefined) => Record<string, McpServerConfig>;
     /** When false, don't persist session to filesystem */
     persistSession?: boolean;
     /** SDK permission mode override (per-thread from DB) */
@@ -197,6 +197,8 @@ class JobRunner {
         if (pager) log.debug(`Pager created for thread=${job.threadId}`);
         let lastResultText = '';
 
+        let currentSessionId: string | undefined = job.sessionId || undefined;
+
         const canUseTool = createCanUseTool(job.threadId);
         let lastTypingTime = 0;
         let watchdogResetFn: (() => void) | undefined;
@@ -223,7 +225,7 @@ class JobRunner {
                 model: job.model,
                 forkSession: job.forkSession,
                 resumeSessionAt: job.resumeSessionAt,
-                mcpServers: job.createMcpServers?.(),
+                mcpServers: job.createMcpServers?.(() => currentSessionId),
                 persistSession: job.persistSession,
                 permissionMode: job.permissionMode,
                 canUseTool: canUseToolWithWatchdog,
@@ -266,6 +268,7 @@ class JobRunner {
                         if (initSessionId && initSessionId !== job.sessionId) {
                             // Save SDK-generated session ID to DB
                             updateThreadSession(job.threadId, initSessionId);
+                            currentSessionId = initSessionId;
                             log(`Session saved for thread ${job.threadId}: ${initSessionId}`);
                             const label = job.forkSession ? 'Forked session' : 'New session';
                             await sender([{
@@ -376,7 +379,7 @@ class JobRunner {
                 });
             }
 
-            // Generate title on first completion or after title_generate tool clears it
+            // Generate title on first completion or after discord_set_title tool clears it
             if (!getThreadTitle(job.threadId) && lastResultText) {
                 log.debug(`Triggering title generation for thread=${job.threadId}`);
                 this.generateAndSetTitle(job.threadId, resultSessionId, job.workingDir);

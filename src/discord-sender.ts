@@ -20,9 +20,10 @@ const sendEmbed = (threadId: string, embeds: EmbedData[]) => _sendEmbed(threadId
 
 /** Tools whose tool_use and tool_result are silently suppressed (content already sent to Discord) */
 const SILENT_TOOLS = new Set([
-    'mcp__disclaw__discord_send_image',
-    'mcp__disclaw__discord_send_media',
-    'mcp__disclaw__discord_send_file',
+    'mcp__disclaw__discord_send',
+    'mcp__disclaw__discord_edit',
+    'mcp__disclaw__discord_create_thread',
+    'mcp__disclaw__discord_set_title',
 ]);
 
 /** Safely access a key from a loosely-typed metadata bag (only for SystemMessage.metadata) */
