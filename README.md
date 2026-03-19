@@ -28,13 +28,15 @@ A Discord harness for Claude Code. Thread-based AI conversations with rich inter
 - Completion stats: model name, context usage %, response time
 - Session change notifications: "New session", "Forked session", "Resumed session" embeds with model and working directory
 
-### Discord Media Tools
-Claude can send files directly to Discord threads via built-in MCP tools:
-- `discord_send_image` — Images as rich embed previews (PNG, JPG, GIF, WebP, AVIF)
-- `discord_send_media` — Audio/video with inline player (MP3, WAV, OGG, MP4, WebM)
-- `discord_send_file` — Downloadable attachments (PDF, MD, ZIP, CSV, code files)
+### Discord MCP Tools
+Claude has full Discord API access via 16 built-in MCP tools:
+- **Messages** — `discord_send` (text/embeds/files/replies, auto-split), `discord_edit`, `discord_get`, `discord_list`
+- **Threads** — `discord_create_thread`, `discord_set_title` (manual or AI-generated)
+- **Reactions** — `discord_react`, `discord_unreact`
+- **Management** — `discord_delete`, `discord_channels`, `discord_threads`
+- **Cron** — `cron_create`, `cron_list`, `cron_update`, `cron_delete`, `cron_run_now`
 
-All files validated with extension whitelist and 25MB Discord size limit.
+Files validated against extension whitelist and 25MB Discord size limit. All tools default to the current thread.
 
 ### Slash Commands (`/disclaw`)
 | Command | Description |
@@ -68,7 +70,7 @@ Each conversation runs Claude Code in a specific directory. Resolution chain:
 2. **Thread config**: `/disclaw cd` in a thread sets a thread-level override (clears session for fresh start)
 3. **Channel config**: `/disclaw cd` in a channel sets the default for all new threads
 4. **Environment variable**: `CLAUDE_WORKING_DIR`
-5. **Fallback**: `process.cwd()`
+5. **Fallback**: `/tmp/disclaw`
 
 For multi-user deployments, set `DISCLAW_ALLOWED_DIRS` to restrict accessible directories:
 ```bash
@@ -116,21 +118,22 @@ Discord Gateway → Bot (bot.ts)
                     │           ├── message-converter.ts → ClaudeMessage[]
                     │           └── discord-sender.ts → Discord embeds
                     ├── Cron scheduler → cron.ts (croner)
-                    ├── MCP server → mcp-server.ts
-                    │     ├── Cron tools (cron_create, cron_list, cron_delete, cron_update)
-                    │     ├── Thread tools (title_generate)
-                    │     └── Media tools (discord_send_image, discord_send_media, discord_send_file)
+                    ├── MCP server → mcp-server.ts (16 tools)
+                    │     ├── Cron tools (cron_create, cron_list, cron_delete, cron_update, cron_run_now)
+                    │     └── Discord tools (discord_send, discord_edit, discord_get, discord_list,
+                    │           discord_create_thread, discord_set_title, discord_react,
+                    │           discord_unreact, discord_delete, discord_channels, discord_threads)
                     └── SQLite (db.ts) — thread/session mappings, channel configs, cron jobs, pager messages
 ```
 
-Single process. No Redis, no queue, no HTTP server. The runner uses an async semaphore for concurrency control (default: 2 concurrent jobs) with retry and exponential backoff.
+Single process. No Redis, no queue, no HTTP server. The runner uses an async semaphore for concurrency control (default: 10 concurrent jobs) with per-thread serialization, retry and exponential backoff.
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | Yes | — | Discord bot token |
-| `CLAUDE_WORKING_DIR` | No | `cwd` | Default working directory for Claude |
+| `CLAUDE_WORKING_DIR` | No | `/tmp/disclaw` | Default working directory for Claude |
 | `DISCLAW_ALLOWED_DIRS` | No | — | Comma-separated directory allowlist |
 | `DB_PATH` | No | `./data/threads.db` | SQLite database path |
 | `DISCLAW_PERMISSION_MODE` | No | `default` | Default permission mode (`default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`) |
