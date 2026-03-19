@@ -365,7 +365,7 @@ export function createDisclawMcpServer(
             // Update thread name if name changed
             if (args.name !== undefined) {
                 const newThreadName = truncateCodePoints(`\u{23F0} ${args.name}`, 50);
-                await renameThread(job.thread_id, newThreadName).catch(err => log.error(`Failed to rename thread for job ${args.job_id}: ${err}`));
+                renameThread(job.thread_id, newThreadName).catch(err => log.error(`Failed to rename thread for job ${args.job_id}: ${err}`));
                 setThreadTitle(job.thread_id, newThreadName);
             }
 
@@ -722,9 +722,13 @@ export function createDisclawMcpServer(
                 }
 
                 setThreadTitle(target, title);
-                await renameThread(target, title);
+                // Fire-and-forget: Discord rate-limits thread renames (2/10min),
+                // so don't block the tool response on the API call
+                renameThread(target, title).catch(err =>
+                    log.error(`Failed to rename thread ${target}: ${err}`)
+                );
                 log(`MCP discord_set_title succeeded: thread=${target} title="${title}"`);
-                return { content: [{ type: 'text' as const, text: `Title updated: ${title}` }] };
+                return { content: [{ type: 'text' as const, text: `Title saved: ${title} (Discord rename is async — may take a moment due to rate limits)` }] };
             } catch (err) {
                 log.error(`MCP discord_set_title failed: ${err}`);
                 return { content: [{ type: 'text' as const, text: `Failed to set title: ${err}` }], isError: true };
