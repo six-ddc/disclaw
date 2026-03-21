@@ -11,6 +11,7 @@ import {
     escapeCodeBlock, formatToolName, truncateContent, cleanContent,
     buildToolUseEmbed, buildToolResultField,
 } from './tool-embeds.js';
+import { PERMISSION_MODES, DISPLAY_MODES } from './types.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('discord-sender');
@@ -213,6 +214,12 @@ export function createClaudeSender(threadId: string) {
                         if (model) parts.push(model);
                         const cwd = meta<string>(metadata, 'cwd', '');
                         if (cwd) parts.push(`\`${cwd}\``);
+                        const permMode = meta<string>(metadata, 'permissionMode', '');
+                        const permLabel = PERMISSION_MODES.find(m => m.value === permMode)?.label;
+                        if (permLabel) parts.push(permLabel);
+                        const dispMode = meta<string>(metadata, 'displayMode', '');
+                        const dispLabel = DISPLAY_MODES.find(m => m.value === dispMode)?.label;
+                        if (dispLabel) parts.push(dispLabel);
                         const sessionMsgId = await sendEmbed(threadId, [{
                             color: 0x57f287,
                             description: `**${label}** · ${parts.join(' · ')}`,

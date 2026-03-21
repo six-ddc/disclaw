@@ -255,7 +255,11 @@ class JobRunner {
                         const resultText = (sdkMessage as Record<string, unknown>).result as string | undefined;
                         if (resultText) {
                             lastResultText = resultText;
-                            if (pager) await sendToThread(job.threadId, resultText);
+                            if (pager) {
+                                // Discard buffered text if it matches result (same content)
+                                pager.discardPendingText(resultText);
+                                await sendToThread(job.threadId, resultText);
+                            }
                         }
                     }
 
@@ -279,6 +283,8 @@ class JobRunner {
                                     label,
                                     model: initModel,
                                     cwd: initCwd,
+                                    permissionMode: job.permissionMode,
+                                    displayMode,
                                 },
                             }]);
                         }

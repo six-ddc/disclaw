@@ -46,6 +46,9 @@ export interface ToolPager {
     handleMessage(msg: ClaudeMessage): void;
     /** Track raw SDK messages to capture first message UUID for offset calculation */
     trackRawMessage(sdkMessage: { type: string; uuid?: string }): void;
+    /** Discard buffered text if it matches the result (same content, sent as standalone).
+     *  Returns true if discarded, false if kept (mismatch → flushed as page). */
+    discardPendingText(resultText: string): boolean;
     /** Finalize: remove buttons, save metadata to DB for reaction-triggered restore */
     destroy(sessionId: string, workingDir: string): Promise<void>;
 }
@@ -152,6 +155,8 @@ interface LivePagerState {
     destroyed: boolean;
     /** UUID of the first user/assistant SDK message in this round */
     firstMessageUuid: string | null;
+    /** Buffered text page — held until next message arrives to decide if it's the final text */
+    pendingText: PagerPage | null;
 }
 
 const activePagers = new Map<string, LivePagerState>();
@@ -206,6 +211,16 @@ function scheduleUpdate(state: LivePagerState): void {
             state.flushing = null;
         });
     }, delay);
+}
+
+/** Flush buffered text into the page list (called when a non-text message proves it's intermediate) */
+function flushPendingText(state: LivePagerState, id: string): void {
+    if (!state.pendingText) return;
+    state.pages.push(state.pendingText);
+    state.currentPage = state.pages.length - 1;
+    state.pendingText = null;
+    log.debug(`[${id}] flushed pending text -> page=${state.currentPage}`);
+    scheduleUpdate(state);
 }
 
 // =========================================================================
@@ -378,6 +393,7 @@ export function createToolPager(threadId: string): ToolPager {
         flushing: null,
         destroyed: false,
         firstMessageUuid: null,
+        pendingText: null,
     };
 
     activePagers.set(id, state);
@@ -393,8 +409,29 @@ export function createToolPager(threadId: string): ToolPager {
             }
         },
 
+        discardPendingText(resultText: string): boolean {
+            if (!state.pendingText) return true;
+            // Compare first 100 chars of pending content vs result text
+            const pending = state.pendingText.content || '';
+            const compareLen = Math.min(100, pending.length, resultText.length);
+            if (pending.slice(0, compareLen) === resultText.slice(0, compareLen)) {
+                log(`[${id}] discarded pending text (matches result, compared ${compareLen} chars)`);
+                state.pendingText = null;
+                return true;
+            }
+            // Mismatch — pending text is different content, flush it as a page
+            log.warn(`[${id}] pending text does NOT match result, flushing as page`);
+            flushPendingText(state, id);
+            return false;
+        },
+
         handleMessage(msg: ClaudeMessage): void {
             if (state.destroyed) return;
+
+            // Flush any previously buffered text before processing new messages.
+            // For text messages, this flushes the old buffer; the new text will be re-buffered below.
+            // For non-text messages, pending text is confirmed as intermediate and becomes a page.
+            flushPendingText(state, id);
 
             switch (msg.type) {
                 case 'tool_use': {
@@ -440,15 +477,17 @@ export function createToolPager(threadId: string): ToolPager {
                     break;
                 }
                 case 'text': {
-                    state.pages.push({
+                    // Buffer text instead of creating a page immediately.
+                    // If the next message is non-text, this gets flushed as an intermediate page.
+                    // If this is the final text (followed by result), it's discarded in destroy()
+                    // because the result handler already sends it as a standalone message.
+                    state.pendingText = {
                         kind: 'text',
                         label: 'Assistant',
                         content: truncatePreview(msg.content, 20, 3500),
                         status: 'done',
-                    });
-                    state.currentPage = state.pages.length - 1;
-                    log.debug(`[${id}] +text page=${state.currentPage}`);
-                    scheduleUpdate(state);
+                    };
+                    log.debug(`[${id}] buffered text (pending)`);
                     break;
                 }
                 case 'tool_progress':
@@ -547,8 +586,19 @@ export function createToolPager(threadId: string): ToolPager {
         },
 
         async destroy(sessionId: string, workingDir: string): Promise<void> {
-            log(`[${id}] destroy() called: session=${sessionId}, pages=${state.pages.length}, messageId=${state.messageId}, firstUuid=${state.firstMessageUuid}`);
+            log(`[${id}] destroy() called: session=${sessionId}, pages=${state.pages.length}, messageId=${state.messageId}, firstUuid=${state.firstMessageUuid}, pendingText=${!!state.pendingText}`);
             state.destroyed = true;
+
+            // Flush any remaining pending text as a page.
+            // If result was received, discardPendingText() already cleared this.
+            // Reaching here with pendingText means no result was sent (error/interrupt).
+            if (state.pendingText) {
+                state.pages.push(state.pendingText);
+                state.currentPage = state.pages.length - 1;
+                state.pendingUpdate = true;
+                state.pendingText = null;
+                log(`[${id}] flushed pending text on destroy (no result received) -> page=${state.currentPage}`);
+            }
 
             // Flush pending updates
             if (state.updateTimer) {
