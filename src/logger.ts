@@ -12,8 +12,9 @@
 import pino from 'pino';
 import { mkdirSync } from 'fs';
 import { resolve } from 'path';
+import { DEFAULT_LOG_DIR } from './paths.js';
 
-const LOG_DIR = resolve(process.cwd(), 'logs');
+const LOG_DIR = process.env.LOG_DIR || DEFAULT_LOG_DIR;
 mkdirSync(LOG_DIR, { recursive: true });
 
 function getLogFile(): string {

@@ -10,6 +10,7 @@ import type { MultimodalPrompt } from './attachment-handler.js';
 import type { PermissionMode } from './types.js';
 import { isValidPermissionMode } from './types.js';
 import { createLogger } from './logger.js';
+import { DEFAULT_WORKING_DIR } from './paths.js';
 
 const TIMEZONE = process.env.TZ;
 
@@ -71,7 +72,7 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
             model, forkSession, resumeSessionAt, mcpServers, persistSession, canUseTool,
             permissionMode: permModeOverride, onWatchdogReset } = options;
 
-    const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || '/tmp/disclaw'; // Final fallback — callers should resolve via working-dir.ts
+    const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || DEFAULT_WORKING_DIR;
     log(`Query started - session: ${sessionId || '(auto)'}, resume: ${resume}, model: ${model || '(default)'}, workingDir: ${cwd}`);
     if (forkSession) log(`Forking session from: ${sessionId}`);
     if (resumeSessionAt) log(`Resuming session at message: ${resumeSessionAt}`);

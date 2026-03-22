@@ -74,7 +74,7 @@ Resolution chain (highest priority first):
 2. **Thread config**: `/disclaw cd` in a thread (clears session)
 3. **Channel config**: `/disclaw cd` in a channel (default for new threads)
 4. **Environment variable**: `CLAUDE_WORKING_DIR`
-5. **Fallback**: `/tmp/disclaw`
+5. **Fallback**: `~/.disclaw`
 
 Multi-user deployments: set `DISCLAW_ALLOWED_DIRS` to restrict accessible directories.
 
@@ -134,9 +134,9 @@ Single process. No Redis, no queue, no HTTP server. The runner uses an async sem
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | Yes | — | Discord bot token |
-| `CLAUDE_WORKING_DIR` | No | `/tmp/disclaw` | Default working directory for Claude |
+| `CLAUDE_WORKING_DIR` | No | `~/.disclaw` | Default working directory for Claude |
 | `DISCLAW_ALLOWED_DIRS` | No | — | Comma-separated directory allowlist |
-| `DB_PATH` | No | `./data/threads.db` | SQLite database path |
+| `LOG_DIR` | No | `~/.local/state/disclaw/logs` | Log directory (XDG) |
 | `DISCLAW_PERMISSION_MODE` | No | `default` | Default permission mode (`default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`) |
 | `SHOW_LINK_PREVIEWS` | No | — | Show URL embeds in bot messages |
 | `TZ` | No | system | Timezone for cron schedules and datetime display |

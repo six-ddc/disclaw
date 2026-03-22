@@ -10,13 +10,9 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import { getChannelConfigCached, getThreadMapping } from './db.js';
 import { createLogger } from './logger.js';
+import { DEFAULT_WORKING_DIR } from './paths.js';
 
 const log = createLogger('working-dir');
-
-const DEFAULT_WORKING_DIR = '/tmp/disclaw';
-
-// Ensure the default working directory exists
-mkdirSync(DEFAULT_WORKING_DIR, { recursive: true });
 
 // Allowed working directories (configurable via env, comma-separated)
 const ALLOWED_DIRS = process.env.DISCLAW_ALLOWED_DIRS

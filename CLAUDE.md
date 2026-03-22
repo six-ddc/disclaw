@@ -37,7 +37,7 @@ There are no tests or linting configured.
 
 **Session ID lifecycle:** The bot never generates session UUIDs — the SDK auto-generates them. On each query, the SDK sends an init message (`type: 'system', subtype: 'init'`) containing `session_id`. The runner compares this with the stored ID; if different (new session), it saves the SDK ID to DB and sends a "New session" / "Forked session" notification embed. Ephemeral sessions (`persistSession: false`, e.g. cron) skip this.
 
-**Working directory resolution (fallback chain):** `[/path]` message prefix override → `mapping.working_dir` (thread-level) → channel config → `CLAUDE_WORKING_DIR` env → `/tmp/disclaw`. Centralized in `working-dir.ts`. Thread-level override is set via `/disclaw cd` in a thread, which also clears the session (new directory = fresh session).
+**Working directory resolution (fallback chain):** `[/path]` message prefix override → `mapping.working_dir` (thread-level) → channel config → `CLAUDE_WORKING_DIR` env → `~/.disclaw`. Centralized in `working-dir.ts`. Thread-level override is set via `/disclaw cd` in a thread, which also clears the session (new directory = fresh session).
 
 **Key source files:**
 - `src/bot.ts` — Discord event routing (MessageCreate, MessageReactionAdd/Remove, interaction dispatch). No command handler logic — delegates to `interactions.ts`
@@ -58,9 +58,10 @@ There are no tests or linting configured.
 - `src/tool-embeds.ts` — Shared tool embed building logic used by both `discord-sender.ts` (verbose mode) and `tool-pager.ts` (pager mode). Provides `buildToolUseEmbed()`, `buildToolResultField()`, `truncateContent()`, `formatToolName()` with specialized formatting for Agent, Edit, Write, Read/Glob/Grep, TodoWrite, Bash, cron tools, and generic tools
 - `src/tool-pager.ts` — Two-phase paginated display for tool calls/thinking/text in a single navigable Discord embed. Phase 1 (live): in-memory with debounced updates during job execution. Phase 2 (persistent): SDK-backed on-demand page rendering after completion. Supports reaction-triggered button restore/hide and auto-upgrade across bot restarts. Buttons auto-strip after 30s or when next pager appears
 - `src/context-builder.ts` — XML-formatted prompt builder with Discord context injection. Formats user messages as structured XML with sender attribution, timestamps, reply references, and attachments. Prepends `<context>` with channel info, forum post content, thread history, and cron job metadata when adopting threads or starting cron sessions
-- `src/working-dir.ts` — Centralized working directory resolution. Implements the full fallback chain: `[/path]` message prefix → thread mapping → channel config → `CLAUDE_WORKING_DIR` env → `/tmp/disclaw`. Also provides `validateWorkingDir()` for security allowlist enforcement
+- `src/paths.ts` — XDG Base Directory compliant default paths. Exports `DEFAULT_DB_PATH` (`$XDG_DATA_HOME/disclaw/threads.db`), `DEFAULT_WORKING_DIR` (`~/.disclaw`), `DEFAULT_LOG_DIR` (`$XDG_STATE_HOME/disclaw/logs`)
+- `src/working-dir.ts` — Centralized working directory resolution. Implements the full fallback chain: `[/path]` message prefix → thread mapping → channel config → `CLAUDE_WORKING_DIR` env → `~/.disclaw`. Also provides `validateWorkingDir()` for security allowlist enforcement
 - `src/types.ts` — Centralized type definitions for `PermissionMode` and `DisplayMode`. Single source of truth for mode values, labels, descriptions, and type guards used across the codebase
-- `src/logger.ts` — Centralized logging with pino; outputs to both console and daily JSON log files (`logs/YYYY-MM-DD.log`)
+- `src/logger.ts` — Centralized logging with pino; outputs to both console and daily log files (`$XDG_STATE_HOME/disclaw/logs/YYYY-MM-DD.log`)
 
 **Slash commands (`/disclaw <subcommand>`):**
 - `cd` — Set working directory (channel default or thread override; interactive dir picker)
@@ -72,7 +73,7 @@ There are no tests or linting configured.
 - `cron` — List all scheduled tasks (any location)
 
 **Data stores:**
-- SQLite (`./data/threads.db`) — thread/session mappings (incl. working_dir, model, permission_mode, display_mode), channel configs, cron_jobs, pager_messages
+- SQLite (`$XDG_DATA_HOME/disclaw/threads.db`, default `~/.local/share/disclaw/threads.db`) — thread/session mappings (incl. working_dir, model, permission_mode, display_mode), channel configs, cron_jobs, pager_messages
 - No message content is stored (privacy-first design)
 
 ## Runtime & Build
@@ -93,8 +94,8 @@ Cross-platform service management in `service/`. Auto-detects Linux (systemd) / 
 
 ## Logging
 
-Uses `pino` (`src/logger.ts`). Output goes to both console and `logs/YYYY-MM-DD.log` (JSON). When running as a service, logs are also available via `make logs` (Linux: journalctl, macOS: tail logs/). discord.js has built-in rate limit retry — do not add custom retry wrappers on top.
+Uses `pino` (`src/logger.ts`). Output goes to both console and `$XDG_STATE_HOME/disclaw/logs/YYYY-MM-DD.log` (default `~/.local/state/disclaw/logs/`). Override with `LOG_DIR` env var. When running as a service, logs are also available via `make logs` (Linux: journalctl, macOS: tail logs/). discord.js has built-in rate limit retry — do not add custom retry wrappers on top.
 
 ## Environment Variables
 
-Required: `DISCORD_BOT_TOKEN`. Optional: `CLAUDE_WORKING_DIR` (default: `/tmp/disclaw`), `DISCLAW_ALLOWED_DIRS` (comma-separated security allowlist), `DB_PATH` (default: `./data/threads.db`), `DISCLAW_PERMISSION_MODE` (default: `default`; options: `default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`), `SHOW_LINK_PREVIEWS` (show URL embeds in bot messages), `TZ`. See `.env.example`.
+Required: `DISCORD_BOT_TOKEN`. Optional: `CLAUDE_WORKING_DIR` (default: `~/.disclaw`), `DISCLAW_ALLOWED_DIRS` (comma-separated security allowlist), `LOG_DIR` (default: `$XDG_STATE_HOME/disclaw/logs`), `DISCLAW_PERMISSION_MODE` (default: `default`; options: `default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`), `SHOW_LINK_PREVIEWS` (show URL embeds in bot messages), `TZ`. See `.env.example`.

@@ -12,9 +12,10 @@
 import { Database } from 'bun:sqlite';
 import type { PermissionMode, DisplayMode } from './types.js';
 import { createLogger } from './logger.js';
+import { DEFAULT_DB_PATH } from './paths.js';
 
 const log = createLogger('db');
-const DB_PATH = process.env.DB_PATH || './data/threads.db';
+const DB_PATH = process.env.DB_PATH || DEFAULT_DB_PATH;
 
 // Ensure data directory exists
 import { mkdirSync } from 'fs';
