@@ -1,42 +1,42 @@
 # Disclaw
 
-A Discord harness for Claude Code. Thread-based AI conversations with rich interactions, scheduled tasks, and session management.
+**Best AI Agent + Most Agent-Friendly Platform**
+
+[Claude Code](https://claude.ai/code) is the most capable AI agent. [Discord](https://discord.com) is the most agent-friendly communication platform — its threads, buttons, embeds, modals, reactions, and slash commands map naturally to how AI agents work: multi-turn sessions, tool approvals, structured output, and multimodal input. Disclaw fuses them into one seamless experience.
+
+## Discord x Agent: Deep Integration Highlights
+
+> Every Discord-native feature below solves a real agent interaction problem that plain text interfaces can't.
+
+- **Thread = Session** — Each @mention creates a thread that *is* the agent session — isolated workspace, persistent state, concurrent conversations. No session IDs, no context mixing.
+
+- **One-Click Tool Approval** — Agent permission requests become Discord buttons (Allow / Deny / Always Allow) with tool name and input preview. Human-in-the-loop with zero friction.
+
+- **Pager Mode** — Long multi-step agent runs (tool calls, thinking, text) collapse into a single navigable embed with page buttons. Thread stays clean; browse details on demand.
+
+- **Multimodal Drag-and-Drop** — Images, PDFs, code files — drop them into Discord, automatically extracted and sent to Claude as content blocks. No format conversion needed.
+
+- **Visual Directory Picker** — Button-based filesystem browser with pagination and navigation. Select working directories visually without typing paths.
+
+- **Cron Control Panel** — Scheduled tasks get dedicated threads with persistent control buttons (Pause / Resume / Run Now / Delete). Results stream into the thread. Auto-pauses on repeated failures.
+
+- **Fork & Resume** — Branch any conversation into a new thread or resume a previous session from a dropdown menu. Paginated history viewer shows context before you commit.
+
+- **Plan Review** — In `plan` mode, Claude's implementation plan renders as a structured embed with approval buttons: Accept Edits, Manual Approval, or Keep Planning (with feedback modal).
+
+- **Interactive Q&A** — Claude's multi-step questions render as button choices or select menus with progress indicators, back/forward navigation, and Submit All. Feels Discord-native.
+
+- **Rich Tool Embeds** — Each tool type (Edit, Bash, Write, Agent...) gets its own color and specialized format. Edits show red/green diffs. Results merge into the original embed. Tool noise stays silent.
+
+- **Reaction UI Restore** — React to any old pager message to restore its navigation buttons — works across bot restarts, backed by SDK session data, not in-memory state.
+
+- **Smart Rendering** — Markdown tables auto-flatten to card layout (Discord has no table support). Long text splits at code fence boundaries. Unicode-safe truncation.
 
 ## How It Works
 
 @mention the bot in any channel — it creates a thread, spawns a Claude Code session via the [Agent SDK](https://github.com/anthropics/claude-agent-sdk), and streams responses back as Discord messages with rich formatting. Follow-up messages in the thread continue the same session. Everything runs in a single process with no exposed ports — outbound Discord gateway only.
 
 ## Features
-
-### Thread-Based Conversations
-- Each @mention starts a new thread with its own Claude Code session
-- Follow-up messages in the thread resume the same session automatically
-- AI-generated thread titles (emoji-prefixed) based on conversation content
-- Channel status messages show response previews without opening threads
-- Multimodal input: images (PNG/JPEG/GIF/WebP), PDFs, text file attachments, and reply references are sent to Claude as content blocks
-
-### Rich Message Rendering
-- **Display modes** — configurable per-thread via `/disclaw config`:
-  - `verbose` — All tool calls shown as rich embeds in real-time
-  - `simple` — Only final text replies, tool calls and thinking hidden
-  - `pager` — Tool calls collected in a single navigable embed with page buttons
-- Claude's text output renders as full Discord markdown (code blocks, lists, etc.)
-- Tool calls displayed as colored embeds with input preview and result
-- Thinking blocks shown in purple embeds
-- Long messages split intelligently at markdown boundaries (preserving code fences)
-- Markdown tables auto-converted to card-style layout (Discord has no table rendering)
-- Completion stats: model name, context usage %, response time
-- Session change notifications: "New session", "Forked session", "Resumed session" embeds with model and working directory
-
-### Discord MCP Tools
-Claude has full Discord API access via 16 built-in MCP tools:
-- **Messages** — `discord_send` (text/embeds/files/replies, auto-split), `discord_edit`, `discord_get`, `discord_list`
-- **Threads** — `discord_create_thread`, `discord_set_title` (manual or AI-generated)
-- **Reactions** — `discord_react`, `discord_unreact`
-- **Management** — `discord_delete`, `discord_channels`, `discord_threads`
-- **Cron** — `cron_create`, `cron_list`, `cron_update`, `cron_delete`, `cron_run_now`
-
-Files validated against extension whitelist and 25MB Discord size limit. All tools default to the current thread.
 
 ### Slash Commands (`/disclaw`)
 | Command | Description |
@@ -49,33 +49,32 @@ Files validated against extension whitelist and 25MB Discord size limit. All too
 | `resume` | Resume a previous session |
 | `cron` | List all scheduled tasks |
 
-### Scheduled Tasks (Cron)
-Claude can create recurring tasks that run on a cron schedule. Each task gets its own dedicated thread with a control panel:
+### Display Modes
+Configurable per-thread via `/disclaw config`:
+- `verbose` — All tool calls shown as rich embeds in real-time
+- `simple` — Only final text replies, tool calls and thinking hidden
+- `pager` — Tool calls collected in a single navigable embed with page buttons
 
-- **Create** — Ask Claude to "run X every morning at 9am" and it creates a cron job via MCP tools
-- **Control panel** — Each task thread has buttons: Pause/Resume, Run Now, Verbose toggle, Delete
-- **Auto-pause** — Jobs auto-pause after 3 consecutive failures
-- **Timezone-aware** — Schedules respect the configured `TZ` environment variable
+### Discord MCP Tools
+Claude has full Discord API access via 16 built-in MCP tools:
+- **Messages** — `discord_send` (text/embeds/files/replies, auto-split), `discord_edit`, `discord_get`, `discord_list`
+- **Threads** — `discord_create_thread`, `discord_set_title` (manual or AI-generated)
+- **Reactions** — `discord_react`, `discord_unreact`
+- **Management** — `discord_delete`, `discord_channels`, `discord_threads`
+- **Cron** — `cron_create`, `cron_list`, `cron_update`, `cron_delete`, `cron_run_now`
 
-### Session Management
-- **Fork** — Branch a conversation into a new thread while preserving full context
-- **Resume** — Pick any previous session from a list and continue it (in current thread or a new one)
-- **History** — Paginated conversation viewer with navigation buttons (used by fork/resume)
-- **Clear** — Reset context in the current thread to start fresh
+Files validated against extension whitelist and 25MB Discord size limit. All tools default to the current thread.
 
 ### Working Directory
-Each conversation runs Claude Code in a specific directory. Resolution chain:
+Resolution chain (highest priority first):
 
 1. **Per-message override**: `@bot [~/projects/foo] what files are here?`
-2. **Thread config**: `/disclaw cd` in a thread sets a thread-level override (clears session for fresh start)
-3. **Channel config**: `/disclaw cd` in a channel sets the default for all new threads
+2. **Thread config**: `/disclaw cd` in a thread (clears session)
+3. **Channel config**: `/disclaw cd` in a channel (default for new threads)
 4. **Environment variable**: `CLAUDE_WORKING_DIR`
 5. **Fallback**: `/tmp/disclaw`
 
-For multi-user deployments, set `DISCLAW_ALLOWED_DIRS` to restrict accessible directories:
-```bash
-DISCLAW_ALLOWED_DIRS=/home/projects,/var/code
-```
+Multi-user deployments: set `DISCLAW_ALLOWED_DIRS` to restrict accessible directories.
 
 ## Setup
 
