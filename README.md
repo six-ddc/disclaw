@@ -10,11 +10,13 @@
 
 - **Thread = Session** — Each @mention creates a thread that *is* the agent session — isolated workspace, persistent state, concurrent conversations. No session IDs, no context mixing.
 
+- **Forum = Agent** — A Discord forum channel becomes an agent template. The post title and body are injected as the agent's instructions on every new session — create a "Code Review" forum, write your requirements in a post, and get a specialized agent. One forum, one persona.
+
 - **One-Click Tool Approval** — Agent permission requests become Discord buttons (Allow / Deny / Always Allow) with tool name and input preview. Human-in-the-loop with zero friction.
 
 - **Pager Mode** — Long multi-step agent runs (tool calls, thinking, text) collapse into a single navigable embed with page buttons. Thread stays clean; browse details on demand.
 
-- **Multimodal Drag-and-Drop** — Images, PDFs, code files — drop them into Discord, automatically extracted and sent to Claude as content blocks. No format conversion needed.
+- **Multimodal Drag-and-Drop** — Images, PDFs, code files — drop them into Discord, automatically extracted and sent to Claude as content blocks. Reply-quote a message and its content (including images) is included too. No format conversion needed.
 
 - **Visual Directory Picker** — Button-based filesystem browser with pagination and navigation. Select working directories visually without typing paths.
 
