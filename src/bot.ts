@@ -351,7 +351,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             const threadName = truncateCodePoints(displayText || 'New conversation', 50);
             thread = await statusMessage.startThread({
                 name: threadName,
-                autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+                autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
             });
             statusMessageId = statusMessage.id;
         } catch (error) {

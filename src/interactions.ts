@@ -404,7 +404,7 @@ export async function handleFork(interaction: ChatInputCommandInteraction, clien
         const statusMessage = await (parentChannel as TextChannel).send('Forked conversation');
         const newThread = await statusMessage.startThread({
             name: `Fork of ${thread.name}`,
-            autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+            autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
         });
 
         // Store mapping with fork_from — first user message will trigger the actual fork
@@ -487,7 +487,7 @@ async function resumeInNewThread(
     const statusMessage = await parentChannel.send(`Resuming: ${truncateCodePoints(summary, 100)}`);
     const newThread = await statusMessage.startThread({
         name: truncateCodePoints(summary, 50),
-        autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
+        autoArchiveDuration: ThreadAutoArchiveDuration.OneWeek,
     });
 
     db.run(
