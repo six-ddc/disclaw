@@ -4,6 +4,8 @@
 
 [Claude Code](https://claude.ai/code) is the most capable AI agent. [Discord](https://discord.com) is the most agent-friendly communication platform — its threads, buttons, embeds, modals, reactions, and slash commands map naturally to how AI agents work: multi-turn sessions, tool approvals, structured output, and multimodal input. Disclaw fuses them into one seamless experience.
 
+<img width="2326" height="1658" alt="screenshot" src="https://github.com/user-attachments/assets/b90acebf-fb36-4147-8a29-3ac11e0d2de8" />
+
 ## Discord x Agent: Deep Integration Highlights
 
 > Every Discord-native feature below solves a real agent interaction problem that plain text interfaces can't.
