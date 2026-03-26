@@ -6,6 +6,7 @@
  */
 
 import { query, type SDKMessage, type Query, type McpServerConfig, type CanUseTool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { mkdirSync, existsSync } from 'fs';
 import type { MultimodalPrompt } from './attachment-handler.js';
 import type { PermissionMode } from './types.js';
 import { isValidPermissionMode } from './types.js';
@@ -73,6 +74,10 @@ export async function queryClaudeSDK(options: QueryOptions): Promise<string> {
             permissionMode: permModeOverride, onWatchdogReset } = options;
 
     const cwd = workingDir || process.env.CLAUDE_WORKING_DIR || DEFAULT_WORKING_DIR;
+    if (!existsSync(cwd)) {
+        mkdirSync(cwd, { recursive: true });
+        log(`Created working directory: ${cwd}`);
+    }
     log(`Query started - session: ${sessionId || '(auto)'}, resume: ${resume}, model: ${model || '(default)'}, workingDir: ${cwd}`);
     if (forkSession) log(`Forking session from: ${sessionId}`);
     if (resumeSessionAt) log(`Resuming session at message: ${resumeSessionAt}`);
